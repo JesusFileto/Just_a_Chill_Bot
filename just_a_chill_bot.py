@@ -141,9 +141,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
             # Show plot
             print(f"Saving figure for {symbol}")
-            plt.savefig(f"best_bid_ask_{symbol}.png")
-
-
+            plt.savefig(f"data/best_bid_ask_{symbol}.png")
 
     async def trade(self):
         await asyncio.sleep(5)
