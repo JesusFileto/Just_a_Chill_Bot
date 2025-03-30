@@ -6,20 +6,58 @@ import utcxchangelib
 from utcxchangelib import xchange_client
 import asyncio
 import argparse
-import pandas as pd
+import polars as pl
 import heapq
 import matplotlib.pyplot as plt
 
 
 class MyXchangeClient(xchange_client.XChangeClient):
     plot = False
-    #dict to map to time_series dataframes to record historical data
-    stocks = {
-        "APT": pd.DataFrame(columns=["timestamp", "best_bid_px", "best_bid_qt", "best_ask_px", "best_ask_qt"]),
-        "DLR": pd.DataFrame(columns=["timestamp", "best_bid_px", "best_bid_qt", "best_ask_px", "best_ask_qt"]),
-        "MKJ": pd.DataFrame(columns=["timestamp", "best_bid_px", "best_bid_qt", "best_ask_px", "best_ask_qt"]),
-        "AKAV": pd.DataFrame(columns=["timestamp", "best_bid_px", "best_bid_qt", "best_ask_px", "best_ask_qt"]),
-        "AKIM": pd.DataFrame(columns=["timestamp", "best_bid_px", "best_bid_qt", "best_ask_px", "best_ask_qt"]),
+    # Initialize empty DataFrames with optimized schema and settings
+    stock_timeseries = {
+        "APT": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "best_bid_px": pl.Int64,
+            "best_bid_qt": pl.Int64,
+            "best_ask_px": pl.Int64,
+            "best_ask_qt": pl.Int64
+        }),
+        "DLR": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "best_bid_px": pl.Int64,
+            "best_bid_qt": pl.Int64,
+            "best_ask_px": pl.Int64,
+            "best_ask_qt": pl.Int64
+        }),
+        "MKJ": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "best_bid_px": pl.Int64,
+            "best_bid_qt": pl.Int64,
+            "best_ask_px": pl.Int64,
+            "best_ask_qt": pl.Int64
+        }),
+        "AKAV": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "best_bid_px": pl.Int64,
+            "best_bid_qt": pl.Int64,
+            "best_ask_px": pl.Int64,
+            "best_ask_qt": pl.Int64
+        }),
+        "AKIM": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "best_bid_px": pl.Int64,
+            "best_bid_qt": pl.Int64,
+            "best_ask_px": pl.Int64,
+            "best_ask_qt": pl.Int64
+        }),
+    }
+    
+    stock_LOB_timeseries = { 
+        "APT": {},                
+        "DLR": {},
+        "MKJ": {},
+        "AKAV": {},
+        "AKIM": {},
     }
 
     def __init__(self, host: str, username: str, password: str):
@@ -39,7 +77,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
         else:
             book[msg.px] += msg.dq
 
-        print(msg)
+        #print(msg)
         # Triggers server side event to update book in user interface
         if self.user_interface:
             utcxchangelib.requests.post('http://localhost:6060/updates', json={'update_type': 'book_update', 'symbol': msg.symbol, "is_bid": is_bid})
@@ -100,7 +138,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
         self.order_books.items()
         
         book = self.order_books.get(msg.symbol)
-        #print(book)
+        if not book:
+            return
 
         #use heap to get best bid( faster than sorting)
 
@@ -108,34 +147,45 @@ class MyXchangeClient(xchange_client.XChangeClient):
         best_bid = best_bid[0] if best_bid else None 
 
         best_ask = heapq.nsmallest(1, ((k, v) for k, v in book.asks.items() if v), key=lambda x: x[0])
-        best_ask = best_ask[0] if best_ask else None
+        best_ask = best_ask[0] if best_ask else None 
         #these values are truthy just checking if not None
-        print((best_bid or best_ask) )
+        
+        #print((best_bid or best_ask) )
         if not best_bid or not best_ask:
             return
-        print(best_ask)
-        row = pd.DataFrame([{
+        #print(best_ask)
+        row = pl.DataFrame({
             "timestamp": index,
             "best_bid_px": best_bid[0],
             "best_bid_qt": best_bid[1],
             "best_ask_px": best_ask[0],
             "best_ask_qt": best_ask[1],
-        }])
-        self.stocks[msg.symbol] = pd.concat([self.stocks[msg.symbol],row], axis=0)
+        })
+        if (best_ask[0] - best_bid[0]) > 100:
+            print("spread is too wide")
+            print(best_ask, best_bid)
+        
+        print(index)
+        
+        bids = pl.DataFrame({"px": book.bids.keys(), "qty": book.bids.values()})
+        asks = pl.DataFrame({"px": book.asks.keys(), "qty": book.asks.values()})
+        self.stock_LOB_timeseries[msg.symbol][index] = {"bids": bids, "asks": asks}
+        self.stock_timeseries[msg.symbol] = pl.concat([self.stock_timeseries[msg.symbol],row])
         #print(self.stocks[msg.symbol])
 
     async def plot_best_bid_ask(self):
-        for symbol, df in self.stocks.items():
+        for symbol, df in self.stock_timeseries.items():
             plt.figure(figsize=(12, 6))
-            print(df["best_bid_px"])
-            plt.plot(df["timestamp"], df["best_bid_px"], label="Best Bid Price", linestyle="-",markersize=1)
-            plt.plot(df["timestamp"], df["best_ask_px"], label="Best Ask Price", linestyle="-",markersize=1)
+            
+            timestamp = df["timestamp"].to_list()
+            best_bid_px = df["best_bid_px"].to_list()
+            best_ask_px = df["best_ask_px"].to_list()
+            
+            plt.plot(timestamp, best_bid_px, label="Best Bid Price", linestyle="-",markersize=1)
+            plt.plot(timestamp, best_ask_px, label="Best Ask Price", linestyle="-",markersize=1)
 
-            # Format plot
-            plt.xlabel("Timestamp")
-            plt.ylabel("Price")
-            plt.title(f"Best Bid & Ask Prices Over Time for {symbol}")
-            plt.legend()
+            plt.legend(["Best Bid Price", "Best Ask Price"])
+            plt.grid(True)
             plt.xticks(rotation=45)
             plt.grid()
 
@@ -162,13 +212,17 @@ class MyXchangeClient(xchange_client.XChangeClient):
         print("my positions:", self.positions)
 
     async def view_books(self):
-        df = pd.DataFrame(columns=['ATP', 'DLR', 'MKJ','AKAV', 'AKIM'])
-        df['security'] = ['ATP', 'DLR', 'MKJ','AKAV', 'AKIM']
+        # Use polars DataFrame for better performance
+        securities = pl.DataFrame({
+            'security': ['ATP', 'DLR', 'MKJ', 'AKAV', 'AKIM']
+        })
+        
         while True:
             await asyncio.sleep(3)
             for security, book in self.order_books.items():
-                sorted_bids = sorted((k,v) for k,v in book.bids.items() if v != 0)
-                sorted_asks = sorted((k,v) for k,v in book.asks.items() if v != 0)
+                # Extract prices where quantity > 0 for printing
+                sorted_bids = sorted((p, q) for p, q in book.bids.items() if q > 0)
+                sorted_asks = sorted((p, q) for p, q in book.asks.items() if q > 0)
                 print(f"Bids for {security}:\n{sorted_bids}")
                 print(f"Asks for {security}:\n{sorted_asks}")
     
@@ -215,13 +269,17 @@ class MyXchangeClient(xchange_client.XChangeClient):
             xchange_client._LOGGER.info("End of GRPC stream. Shutting down.")
 
             # Need to terminate the react process here.
-
             exit(0)
 
         #near end of trading session display plots for analysis
-        if msg.index >= 144500 and self.plot is False:
+        
+        if msg.index >= 120000 and self.plot is False:
+            xchange_client._LOGGER.info("plotting best bid ask")
+            print(self.stock_LOB_timeseries)
+            print("plotting best bid ask")
             self.plot = True
             await self.plot_best_bid_ask()
+            exit(0)
         msg_type = msg.WhichOneof('body')
         # _LOGGER.info("Receieved message of type %s. index %d", msg_type, msg.index)
         # _LOGGER.info(msg)
