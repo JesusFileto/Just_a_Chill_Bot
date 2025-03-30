@@ -1,7 +1,7 @@
 #%% 
 
 from typing import Optional
-
+import threading
 import utcxchangelib
 from utcxchangelib import xchange_client
 import asyncio
@@ -9,10 +9,17 @@ import argparse
 import polars as pl
 import heapq
 import matplotlib.pyplot as plt
+from computebot import Compute
+from readbot import DataIngestion
+import concurrent.futures
+import time
 
 
 class MyXchangeClient(xchange_client.XChangeClient):
     plot = False
+    # Thread lock for synchronizing access to shared data
+    _lock = threading.Lock()
+    
     # Initialize empty DataFrames with optimized schema and settings
     stock_timeseries = {
         "APT": pl.DataFrame(schema={
@@ -59,10 +66,75 @@ class MyXchangeClient(xchange_client.XChangeClient):
         "AKAV": {},
         "AKIM": {},
     }
+    
+    # Thread management
+    _threads = {}
+    _thread_stop_event = threading.Event()
 
     def __init__(self, host: str, username: str, password: str):
         super().__init__(host, username, password)
+        # Initialize bot components
+        self.compute_bot = Compute()
+        self.data_bot = DataIngestion(self)
         
+    # Add method to start bot threads
+    def start_bot_threads(self):
+        """Start the compute and read bot threads"""
+        # Create thread stop event
+        self._thread_stop_event.clear()
+        
+        # question: how should we implement multiple threads for compute bot?
+        # idea: create threads for the different symbols bots
+        # keep this for now
+        self._threads["compute_bot"] = threading.Thread(
+            target=self._run_compute_bot,
+            daemon=True
+        )
+        
+        self._threads["data_bot"] = threading.Thread(
+            target=self._run_data_bot,
+            daemon=True
+        )
+        
+        # Start all threads
+        for thread in self._threads.values():
+            thread.start()
+            
+        print("Bot threads started")
+    
+    def stop_bot_threads(self):
+        """Signal threads to stop and wait for completion"""
+        # Signal threads to stop
+        self._thread_stop_event.set()
+        
+        # Wait for threads to finish
+        for name, thread in self._threads.items():
+            if thread.is_alive():
+                print(f"Waiting for {name} thread to finish...")
+                thread.join(timeout=5)  # Wait with timeout
+                
+        # Clear thread dictionary
+        self._threads.clear()
+        print("Bot threads stopped")
+    
+    def _run_compute_bot(self):
+        """Run the compute bot in a loop until stop event is set"""
+        pass
+    
+    def _run_data_bot(self):
+        """Run the data ingestion bot"""
+        # Since data ingestion happens via async handlers,
+        # this thread can monitor and manage the data bot
+        while not self._thread_stop_event.is_set():
+            try:
+                # Any monitoring or management of data ingestion
+                pass
+            except Exception as e:
+                print(f"Data bot error: {e}")
+            
+            # Sleep to avoid high CPU usage
+            time.sleep(0.1)
+
     async def handle_book_update(self, msg, index) -> None:
         """
         Updates the book based on the incremental updates to the books
@@ -82,7 +154,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
         if self.user_interface:
             utcxchangelib.requests.post('http://localhost:6060/updates', json={'update_type': 'book_update', 'symbol': msg.symbol, "is_bid": is_bid})
 
-        await self.bot_handle_book_update(msg, index)
+        # Call the data bot's book update handler
+        await self.data_bot.bot_handle_book_update(msg, index)
 
     async def bot_handle_cancel_response(self, order_id: str, success: bool, error: Optional[str]) -> None:
         order = self.open_orders[order_id]
@@ -96,9 +169,6 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
 
     async def bot_handle_trade_msg(self, symbol: str, price: int, qty: int):
-        pass
-
-    async def bot_handle_book_update(self, symbol: str) -> None:
         pass
 
     async def bot_handle_swap_response(self, swap: str, qty: int, success: bool):
@@ -132,54 +202,16 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
             pass
     
-    async def bot_handle_book_update(self, msg, index) -> None:
-        #symbol being traded will never not be in dict
-        #fastest way to append to pandas row is through a list
-        self.order_books.items()
-        
-        book = self.order_books.get(msg.symbol)
-        if not book:
-            return
-
-        #use heap to get best bid( faster than sorting)
-
-        sorted_bids = sorted(((k, v) for k, v in book.bids.items() if v), key=lambda x: x[0], reverse=True)
-        best_bid = sorted_bids[0] if sorted_bids else None
-
-        sorted_asks = sorted(((k, v) for k, v in book.asks.items() if v), key=lambda x: x[0])
-        best_ask = sorted_asks[0] if sorted_asks else None
-        #these values are truthy just checking if not None
-        
-        #print((best_bid or best_ask) )
-        if not best_bid or not best_ask:
-            return
-        #print(best_ask)
-        row = pl.DataFrame({
-            "timestamp": index,
-            "best_bid_px": best_bid[0],
-            "best_bid_qt": best_bid[1],
-            "best_ask_px": best_ask[0],
-            "best_ask_qt": best_ask[1],
-        })
-        if (best_ask[0] - best_bid[0]) > 100:
-            print("spread is too wide")
-            print(best_ask, best_bid)
-        
-        print(index)
-        
-        bids = pl.DataFrame({"px": [bid[0] for bid in sorted_bids], "qty": [bid[1] for bid in sorted_bids]})
-        asks = pl.DataFrame({"px": [ask[0] for ask in sorted_asks], "qty": [ask[1] for ask in sorted_asks]})
-        self.stock_LOB_timeseries[msg.symbol][index] = {"bids": bids, "asks": asks}
-        self.stock_timeseries[msg.symbol] = pl.concat([self.stock_timeseries[msg.symbol],row])
-        #print(self.stocks[msg.symbol])
 
     async def plot_best_bid_ask(self):
         for symbol, df in self.stock_timeseries.items():
             plt.figure(figsize=(12, 6))
             
-            timestamp = df["timestamp"].to_list()
-            best_bid_px = df["best_bid_px"].to_list()
-            best_ask_px = df["best_ask_px"].to_list()
+            # Thread-safe read of timeseries data
+            with self._lock:
+                timestamp = df["timestamp"].to_list()
+                best_bid_px = df["best_bid_px"].to_list()
+                best_ask_px = df["best_ask_px"].to_list()
             
             plt.plot(timestamp, best_bid_px, label="Best Bid Price", linestyle="-",markersize=1)
             plt.plot(timestamp, best_ask_px, label="Best Ask Price", linestyle="-",markersize=1)
@@ -227,6 +259,10 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 print(f"Asks for {security}:\n{sorted_asks}")
     
     async def start(self, user_interface):
+        # Start bot threads
+        self.start_bot_threads()
+        
+        # Create tasks
         #asyncio.create_task(self.trade())
         #asyncio.create_task(self.view_books())
 
@@ -236,7 +272,11 @@ class MyXchangeClient(xchange_client.XChangeClient):
             self.launch_user_interface()
             asyncio.create_task(self.handle_queued_messages())
 
-        await self.connect()
+        try:
+            await self.connect()
+        finally:
+            # Ensure threads are stopped when the main coroutine exits
+            self.stop_bot_threads()
                 
     ### THE FOLLOWING FUNCTIONS ARE LOANED AND MODIFIED FROM THE PARENTS CLASS
     ### in the utxchangelib we cannot modify the python files but we can overload its methods
@@ -273,7 +313,10 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
         #near end of trading session display plots for analysis
         
-        if msg.index >= 120000 and self.plot is False:
+        # index seems to continue increasing, confused as to why if coming from server
+        # the rounds still ends after some random time just increasing index number.
+        if msg.index >= 530000 and self.plot is False:
+            xchange_client._LOGGER.info(msg.index)
             xchange_client._LOGGER.info("plotting best bid ask")
             print(self.stock_LOB_timeseries)
             print("plotting best bid ask")
@@ -339,7 +382,6 @@ if __name__ == "__main__":
 
     loop = asyncio.get_event_loop()
     result = loop.run_until_complete(main(user_interface))
-
 
 
 

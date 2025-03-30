@@ -1,4 +1,6 @@
 # imports 
+import polars as pl
+import numpy as np
 
 # super class for all compute bots
 class Compute: 
