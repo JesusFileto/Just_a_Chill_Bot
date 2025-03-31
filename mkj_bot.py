@@ -21,3 +21,7 @@ class MKJBot(Compute):
     def _update_support_resistance(self, df):
         """Identify support and resistance levels for MKJ"""
         pass
+
+    async def process_update(self, index):
+        """Override for MKJ-specific update processing"""
+        pass

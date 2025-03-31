@@ -20,3 +20,6 @@ class APTBot(Compute):
     def analyze_trends(self, df):
         """APT-specific trend analysis"""
         pass
+
+    async def process_update(self, index):
+        pass

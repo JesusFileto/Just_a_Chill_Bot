@@ -21,3 +21,7 @@ class DLRBot(Compute):
     def _update_volatility(self, df):
         """Calculate DLR volatility"""
         pass
+
+    async def process_update(self, index):
+        """Override for DLR-specific update processing"""
+        pass

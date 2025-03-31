@@ -30,3 +30,7 @@ class AKIMAKAVBot(Compute):
     def update_pair_correlation(self):
         """Calculate correlation between AKIM and AKAV"""
         pass
+
+    async def process_update(self, index):
+        """Override for AKIM/AKAV-specific update processing"""
+        pass

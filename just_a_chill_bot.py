@@ -17,6 +17,87 @@ from mkj_bot import MKJBot
 from akim_akav_bot import AKIMAKAVBot
 import concurrent.futures
 import time
+import queue
+
+
+class ComputeThread(threading.Thread):
+    """A thread class that runs an asyncio event loop for compute bots"""
+    
+    def __init__(self, name, bot, queue):
+        super().__init__(name=name, daemon=True)
+        self.bot = bot
+        self.message_queue = queue
+        self.stop_event = threading.Event()
+        self.loop = None
+        
+    def run(self):
+        """Run the asyncio event loop in this thread"""
+        # Create a new event loop for this thread
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        
+        try:
+            # Run the compute bot coroutine
+            self.loop.run_until_complete(self._process_updates())
+        except Exception as e:
+            print(f"{self.name}: Error in thread: {e}")
+        finally:
+            # Clean up
+            self.loop.close()
+            print(f"{self.name}: Thread and event loop stopped")
+            
+    def stop(self):
+        """Signal the thread to stop"""
+        self.stop_event.set()
+        # If we're waiting on the queue, this will unblock it
+        self.message_queue.put(None)
+        
+    async def _process_updates(self):
+        """Process updates from the message queue"""
+        print(f"{self.name}: Started processing")
+        
+        while not self.stop_event.is_set():
+            try:
+                # Wait for an update with asyncio to allow cancellation
+                index = await self._get_update_async()
+                
+                # None is a signal to check the stop_event
+                if index is None:
+                    continue
+             
+                # Delegate to the bot's process_update method
+                # Each bot class should implement this method
+                await self.bot.process_update(index)
+                
+                # Mark the task as done in the queue (if using standard Queue)
+                if hasattr(self.message_queue, 'task_done'):
+                    self.message_queue.task_done()
+                
+            except Exception as e:
+                print(f"{self.name}: Error processing update: {e}")
+                
+        print(f"{self.name}: Stopped processing updates")
+        
+    async def _get_update_async(self):
+        """Get an update from the queue using asyncio"""
+        # Use run_in_executor to move the blocking queue.get to a thread pool
+        # This allows us to cancel it if needed
+        loop = asyncio.get_event_loop()
+        
+        def get_from_queue():
+            try:
+                # Use a timeout to allow checking the stop event
+                return self.message_queue.get(timeout=0.5)
+            except queue.Empty:
+                return None
+                
+        while not self.stop_event.is_set():
+            update = await loop.run_in_executor(None, get_from_queue)
+            if update is not None or self.stop_event.is_set():
+                return update
+                
+        return None
+        
 
 
 class MyXchangeClient(xchange_client.XChangeClient):
@@ -72,8 +153,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
     }
     
     # Thread management
-    _threads = {}
-    _thread_stop_event = threading.Event()
+    _compute_threads = {}
 
     def __init__(self, host: str, username: str, password: str):
         super().__init__(host, username, password)
@@ -88,164 +168,72 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "AKIM_AKAV": AKIMAKAVBot()
         }
         
-    # Add method to start bot threads
-    def start_bot_threads(self):
-        """Start separate dedicated threads for each compute bot"""
-        # Create thread stop event
-        self._thread_stop_event.clear()
+        # Create message queues for each symbol
+        self.compute_queues = {
+            "APT": queue.Queue(),
+            "DLR": queue.Queue(),
+            "MKJ": queue.Queue(),
+            "AKIM": queue.Queue(),
+            "AKAV": queue.Queue()
+        }
         
-        # Create and start dedicated compute bot threads
-        self._threads["apt_bot"] = threading.Thread(
-            target=self._run_apt_bot,
-            args=(self.compute_bots["APT"],),
-            daemon=True,
-            name="APT-ComputeBot"
+    def start_compute_threads(self):
+        """Start separate compute threads, each with its own asyncio event loop"""
+        # Create and start compute threads
+        self._compute_threads["apt_thread"] = ComputeThread(
+            name="APT-ComputeThread",
+            bot=self.compute_bots["APT"],
+            queue=self.compute_queues["APT"]
         )
         
-        self._threads["dlr_bot"] = threading.Thread(
-            target=self._run_dlr_bot,
-            args=(self.compute_bots["DLR"],),
-            daemon=True,
-            name="DLR-ComputeBot"
+        self._compute_threads["dlr_thread"] = ComputeThread(
+            name="DLR-ComputeThread",
+            bot=self.compute_bots["DLR"],
+            queue=self.compute_queues["DLR"]
         )
         
-        self._threads["mkj_bot"] = threading.Thread(
-            target=self._run_mkj_bot,
-            args=(self.compute_bots["MKJ"],),
-            daemon=True,
-            name="MKJ-ComputeBot"
+        self._compute_threads["mkj_thread"] = ComputeThread(
+            name="MKJ-ComputeThread",
+            bot=self.compute_bots["MKJ"],
+            queue=self.compute_queues["MKJ"]
         )
         
-        self._threads["akim_akav_bot"] = threading.Thread(
-            target=self._run_akim_akav_bot,
-            args=(self.compute_bots["AKIM_AKAV"],),
-            daemon=True,
-            name="AKIM-AKAV-ComputeBot"
+        # AKIM/AKAV bot will handle both symbols
+        self._compute_threads["akim_akav_thread"] = ComputeThread(
+            name="AKIM-AKAV-ComputeThread",
+            bot=self.compute_bots["AKIM_AKAV"],
+            queue=self.compute_queues["AKIM"]  # Use AKIM queue as primary
         )
-        
-    
         
         # Start all threads
-        for thread_name, thread in self._threads.items():
+        for thread_name, thread in self._compute_threads.items():
             thread.start()
-            print(f"Started thread: {thread.name} ({thread_name})")
+            print(f"Started compute thread: {thread.name}")
             
-        print(f"All {len(self._threads)} bot threads started")
+        print(f"All {len(self._compute_threads)} compute threads started")
     
-    def stop_bot_threads(self):
-        """Signal threads to stop and wait for completion"""
-        # Signal threads to stop
-        self._thread_stop_event.set()
-        print("Signaled all threads to stop")
+    def stop_compute_threads(self):
+        """Signal all compute threads to stop and wait for them to finish"""
+        print("Stopping all compute threads...")
         
-        # Define thread stop order (data bot should be last)
-        stop_order = [
-            "apt_bot", "dlr_bot", "mkj_bot", "akim_akav_bot", "data_bot"
-        ]
-        
-        # Wait for threads to finish in specified order
-        for thread_name in stop_order:
-            thread = self._threads.get(thread_name)
-            if thread and thread.is_alive():
-                print(f"Waiting for {thread.name} thread to finish...")
-                start_time = time.time()
-                thread.join(timeout=3)  # Wait with timeout
+        # Signal all threads to stop
+        for thread_name, thread in self._compute_threads.items():
+            thread.stop()
+            
+        # Wait for all threads to finish
+        for thread_name, thread in self._compute_threads.items():
+            if thread.is_alive():
+                print(f"Waiting for {thread.name} to finish...")
+                thread.join(timeout=3)
                 
-                # Check if thread actually stopped
                 if thread.is_alive():
-                    print(f"WARNING: {thread.name} thread did not stop within timeout")
+                    print(f"WARNING: {thread.name} did not stop cleanly")
                 else:
-                    print(f"Successfully stopped {thread.name} thread after {time.time() - start_time:.2f}s")
-                
+                    print(f"Successfully stopped {thread.name}")
+                    
         # Clear thread dictionary
-        stopped_threads = len(self._threads)
-        self._threads.clear()
-        print(f"Bot thread management completed: {stopped_threads} threads managed")
-    
-    def _run_apt_bot(self, bot):
-        """Run the APT compute bot in a dedicated thread"""
-        thread_name = threading.current_thread().name
-        print(f"{thread_name}: Thread started for APT symbol")
-        iteration_count = 0
-        
-        while not self._thread_stop_event.is_set():
-            try:
-                pass
-            
-            except Exception as e:
-                print(f"{thread_name}: Error: {e}")
-            
-            # Check stop flag before sleep
-            if self._thread_stop_event.is_set():
-                break
-                
-            time.sleep(1.0)
-            
-        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
-    
-    def _run_dlr_bot(self, bot):
-        """Run the DLR compute bot in a dedicated thread"""
-        thread_name = threading.current_thread().name
-        print(f"{thread_name}: Thread started for DLR symbol")
-        iteration_count = 0
-        
-        while not self._thread_stop_event.is_set():
-            try:
-                pass
-            
-            except Exception as e:
-                print(f"{thread_name}: Error: {e}")
-            
-            # Check stop flag before sleep
-            if self._thread_stop_event.is_set():
-                break
-                
-            time.sleep(1.0)
-            
-        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
-    
-    def _run_mkj_bot(self, bot):
-        """Run the MKJ compute bot in a dedicated thread"""
-        thread_name = threading.current_thread().name
-        print(f"{thread_name}: Thread started for MKJ symbol")
-        iteration_count = 0
-        
-        while not self._thread_stop_event.is_set():
-            try:
-                pass
-            
-            except Exception as e:
-                print(f"{thread_name}: Error: {e}")
-            
-            # Check stop flag before sleep
-            if self._thread_stop_event.is_set():
-                break
-                
-            time.sleep(1.0)
-            
-        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
-    
-    def _run_akim_akav_bot(self, bot):
-        """Run the AKIM/AKAV compute bot in a dedicated thread"""
-        thread_name = threading.current_thread().name
-        print(f"{thread_name}: Thread started for AKIM and AKAV symbols")
-        iteration_count = 0
-        
-        while not self._thread_stop_event.is_set():
-            try:
-                pass
-            
-            except Exception as e:
-                print(f"{thread_name}: Error: {e}")
-            
-            # Check stop flag before sleep
-            if self._thread_stop_event.is_set():
-                break
-                
-            time.sleep(1.0)
-            
-        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
-    
+        self._compute_threads.clear()
+        print("All compute threads stopped")
 
     async def handle_book_update(self, msg, index) -> None:
         """
@@ -261,13 +249,31 @@ class MyXchangeClient(xchange_client.XChangeClient):
         else:
             book[msg.px] += msg.dq
 
-        #print(msg)
         # Triggers server side event to update book in user interface
         if self.user_interface:
             utcxchangelib.requests.post('http://localhost:6060/updates', json={'update_type': 'book_update', 'symbol': msg.symbol, "is_bid": is_bid})
 
-        # Call the data bot's book update handler
-        await self.data_bot.bot_handle_book_update(msg, index)
+        # Process the book update with the data bot
+        symbol = msg.symbol
+        if symbol in self.stock_timeseries:
+            # Let data bot process the update first
+            await self.data_bot.bot_handle_book_update(msg, index)
+            
+            
+            # If we have data, send it to the appropriate compute queue
+            try:
+                # Create an update tuple with (symbol, timestamp, data)
+                
+                # Put the update in the symbol's queue
+                if symbol in self.compute_queues:
+                    self.compute_queues[symbol].put(index)
+                    
+                    # For AKIM and AKAV, also send to the combined bot if it's not the primary queue
+                    if symbol == "AKAV":
+                        self.compute_queues["AKIM"].put(index)
+                        
+            except Exception as e:
+                print(f"Error queueing update for {symbol}: {e}")
 
     async def bot_handle_cancel_response(self, order_id: str, success: bool, error: Optional[str]) -> None:
         order = self.open_orders[order_id]
@@ -371,15 +377,10 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 print(f"Asks for {security}:\n{sorted_asks}")
     
     async def start(self, user_interface):
-        # Start bot threads
-        self.start_bot_threads()
+        # Start compute threads
+        self.start_compute_threads()
         
-        # Create tasks
-        #asyncio.create_task(self.trade())
-        #asyncio.create_task(self.view_books())
-
-        # This is where Phoenixhood will be launched if desired. There is no need to change these
-        # lines, you can either remove the if or delete the whole thing depending on your purposes.
+        # This is where Phoenixhood will be launched if desired.
         if user_interface:
             self.launch_user_interface()
             asyncio.create_task(self.handle_queued_messages())
@@ -387,8 +388,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
         try:
             await self.connect()
         finally:
-            # Ensure threads are stopped when the main coroutine exits
-            self.stop_bot_threads()
+            # Ensure compute threads are stopped when the main coroutine exits
+            self.stop_compute_threads()
                 
     ### THE FOLLOWING FUNCTIONS ARE LOANED AND MODIFIED FROM THE PARENTS CLASS
     ### in the utxchangelib we cannot modify the python files but we can overload its methods
@@ -427,7 +428,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
         
         # index seems to continue increasing, confused as to why if coming from server
         # the rounds still ends after some random time just increasing index number.
-        if msg.index >= 240000 and self.plot is False:
+        if msg.index >= 100000 and self.plot is False:
             xchange_client._LOGGER.info(msg.index)
             xchange_client._LOGGER.info("plotting best bid ask")
             print(self.stock_LOB_timeseries)
