@@ -18,6 +18,8 @@ from akim_akav_bot import AKIMAKAVBot
 import concurrent.futures
 import time
 import queue
+import signal
+import sys
 
 
 class ComputeThread(threading.Thread):
@@ -420,22 +422,16 @@ class MyXchangeClient(xchange_client.XChangeClient):
         """
         if msg == xchange_client.grpc.aio.EOF:
             xchange_client._LOGGER.info("End of GRPC stream. Shutting down.")
-
+            
+            # Plot before exiting
+            xchange_client._LOGGER.info("Plotting best bid ask before shutdown")
+            await self.plot_best_bid_ask()
+            
             # Need to terminate the react process here.
             exit(0)
 
         #near end of trading session display plots for analysis
         
-        # index seems to continue increasing, confused as to why if coming from server
-        # the rounds still ends after some random time just increasing index number.
-        if msg.index >= 100000 and self.plot is False:
-            xchange_client._LOGGER.info(msg.index)
-            xchange_client._LOGGER.info("plotting best bid ask")
-            print(self.stock_LOB_timeseries)
-            print("plotting best bid ask")
-            self.plot = True
-            await self.plot_best_bid_ask()
-            exit(0)
         msg_type = msg.WhichOneof('body')
         # _LOGGER.info("Receieved message of type %s. index %d", msg_type, msg.index)
         # _LOGGER.info(msg)
@@ -475,7 +471,13 @@ async def main(user_interface: bool):
     TEAMNAME = "yale_buffalo_rutgers_harvard"
     PASSWORD = "mre)2uJdR5"
     my_client = MyXchangeClient(SERVER,TEAMNAME,PASSWORD)
-    await my_client.start(user_interface)
+    
+    try:
+        await my_client.start(user_interface)
+    finally:
+        # Plot data at the end of trading
+        await my_client.plot_best_bid_ask()
+    
     return
 
 
@@ -494,8 +496,9 @@ if __name__ == "__main__":
     user_interface = args.phoenixhood
 
     loop = asyncio.get_event_loop()
-    result = loop.run_until_complete(main(user_interface))
-
-
+    try:
+        result = loop.run_until_complete(main(user_interface))
+    finally:
+        loop.close()
 
 # %%
