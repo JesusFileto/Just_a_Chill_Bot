@@ -143,11 +143,11 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
         #use heap to get best bid( faster than sorting)
 
-        best_bid = heapq.nlargest(1, ((k, v) for k, v in book.bids.items() if v), key=lambda x: x[0])
-        best_bid = best_bid[0] if best_bid else None 
+        sorted_bids = sorted(((k, v) for k, v in book.bids.items() if v), key=lambda x: x[0], reverse=True)
+        best_bid = sorted_bids[0] if sorted_bids else None
 
-        best_ask = heapq.nsmallest(1, ((k, v) for k, v in book.asks.items() if v), key=lambda x: x[0])
-        best_ask = best_ask[0] if best_ask else None 
+        sorted_asks = sorted(((k, v) for k, v in book.asks.items() if v), key=lambda x: x[0])
+        best_ask = sorted_asks[0] if sorted_asks else None
         #these values are truthy just checking if not None
         
         #print((best_bid or best_ask) )
@@ -167,8 +167,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
         
         print(index)
         
-        bids = pl.DataFrame({"px": book.bids.keys(), "qty": book.bids.values()})
-        asks = pl.DataFrame({"px": book.asks.keys(), "qty": book.asks.values()})
+        bids = pl.DataFrame({"px": [bid[0] for bid in sorted_bids], "qty": [bid[1] for bid in sorted_bids]})
+        asks = pl.DataFrame({"px": [ask[0] for ask in sorted_asks], "qty": [ask[1] for ask in sorted_asks]})
         self.stock_LOB_timeseries[msg.symbol][index] = {"bids": bids, "asks": asks}
         self.stock_timeseries[msg.symbol] = pl.concat([self.stock_timeseries[msg.symbol],row])
         #print(self.stocks[msg.symbol])
