@@ -11,6 +11,10 @@ import heapq
 import matplotlib.pyplot as plt
 from computebot import Compute
 from readbot import DataIngestion
+from apt_bot import APTBot
+from dlr_bot import DLRBot
+from mkj_bot import MKJBot
+from akim_akav_bot import AKIMAKAVBot
 import concurrent.futures
 import time
 
@@ -73,67 +77,175 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     def __init__(self, host: str, username: str, password: str):
         super().__init__(host, username, password)
-        # Initialize bot components
-        self.compute_bot = Compute()
+        # Initialize data ingestion bot
         self.data_bot = DataIngestion(self)
+        
+        # Initialize specialized compute bots
+        self.compute_bots = {
+            "APT": APTBot(),
+            "DLR": DLRBot(),
+            "MKJ": MKJBot(),
+            "AKIM_AKAV": AKIMAKAVBot()
+        }
         
     # Add method to start bot threads
     def start_bot_threads(self):
-        """Start the compute and read bot threads"""
+        """Start separate dedicated threads for each compute bot"""
         # Create thread stop event
         self._thread_stop_event.clear()
         
-        # question: how should we implement multiple threads for compute bot?
-        # idea: create threads for the different symbols bots
-        # keep this for now
-        self._threads["compute_bot"] = threading.Thread(
-            target=self._run_compute_bot,
-            daemon=True
+        # Create and start dedicated compute bot threads
+        self._threads["apt_bot"] = threading.Thread(
+            target=self._run_apt_bot,
+            args=(self.compute_bots["APT"],),
+            daemon=True,
+            name="APT-ComputeBot"
         )
         
-        self._threads["data_bot"] = threading.Thread(
-            target=self._run_data_bot,
-            daemon=True
+        self._threads["dlr_bot"] = threading.Thread(
+            target=self._run_dlr_bot,
+            args=(self.compute_bots["DLR"],),
+            daemon=True,
+            name="DLR-ComputeBot"
         )
+        
+        self._threads["mkj_bot"] = threading.Thread(
+            target=self._run_mkj_bot,
+            args=(self.compute_bots["MKJ"],),
+            daemon=True,
+            name="MKJ-ComputeBot"
+        )
+        
+        self._threads["akim_akav_bot"] = threading.Thread(
+            target=self._run_akim_akav_bot,
+            args=(self.compute_bots["AKIM_AKAV"],),
+            daemon=True,
+            name="AKIM-AKAV-ComputeBot"
+        )
+        
+    
         
         # Start all threads
-        for thread in self._threads.values():
+        for thread_name, thread in self._threads.items():
             thread.start()
+            print(f"Started thread: {thread.name} ({thread_name})")
             
-        print("Bot threads started")
+        print(f"All {len(self._threads)} bot threads started")
     
     def stop_bot_threads(self):
         """Signal threads to stop and wait for completion"""
         # Signal threads to stop
         self._thread_stop_event.set()
+        print("Signaled all threads to stop")
         
-        # Wait for threads to finish
-        for name, thread in self._threads.items():
-            if thread.is_alive():
-                print(f"Waiting for {name} thread to finish...")
-                thread.join(timeout=5)  # Wait with timeout
+        # Define thread stop order (data bot should be last)
+        stop_order = [
+            "apt_bot", "dlr_bot", "mkj_bot", "akim_akav_bot", "data_bot"
+        ]
+        
+        # Wait for threads to finish in specified order
+        for thread_name in stop_order:
+            thread = self._threads.get(thread_name)
+            if thread and thread.is_alive():
+                print(f"Waiting for {thread.name} thread to finish...")
+                start_time = time.time()
+                thread.join(timeout=3)  # Wait with timeout
+                
+                # Check if thread actually stopped
+                if thread.is_alive():
+                    print(f"WARNING: {thread.name} thread did not stop within timeout")
+                else:
+                    print(f"Successfully stopped {thread.name} thread after {time.time() - start_time:.2f}s")
                 
         # Clear thread dictionary
+        stopped_threads = len(self._threads)
         self._threads.clear()
-        print("Bot threads stopped")
+        print(f"Bot thread management completed: {stopped_threads} threads managed")
     
-    def _run_compute_bot(self):
-        """Run the compute bot in a loop until stop event is set"""
-        pass
-    
-    def _run_data_bot(self):
-        """Run the data ingestion bot"""
-        # Since data ingestion happens via async handlers,
-        # this thread can monitor and manage the data bot
+    def _run_apt_bot(self, bot):
+        """Run the APT compute bot in a dedicated thread"""
+        thread_name = threading.current_thread().name
+        print(f"{thread_name}: Thread started for APT symbol")
+        iteration_count = 0
+        
         while not self._thread_stop_event.is_set():
             try:
-                # Any monitoring or management of data ingestion
                 pass
-            except Exception as e:
-                print(f"Data bot error: {e}")
             
-            # Sleep to avoid high CPU usage
-            time.sleep(0.1)
+            except Exception as e:
+                print(f"{thread_name}: Error: {e}")
+            
+            # Check stop flag before sleep
+            if self._thread_stop_event.is_set():
+                break
+                
+            time.sleep(1.0)
+            
+        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
+    
+    def _run_dlr_bot(self, bot):
+        """Run the DLR compute bot in a dedicated thread"""
+        thread_name = threading.current_thread().name
+        print(f"{thread_name}: Thread started for DLR symbol")
+        iteration_count = 0
+        
+        while not self._thread_stop_event.is_set():
+            try:
+                pass
+            
+            except Exception as e:
+                print(f"{thread_name}: Error: {e}")
+            
+            # Check stop flag before sleep
+            if self._thread_stop_event.is_set():
+                break
+                
+            time.sleep(1.0)
+            
+        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
+    
+    def _run_mkj_bot(self, bot):
+        """Run the MKJ compute bot in a dedicated thread"""
+        thread_name = threading.current_thread().name
+        print(f"{thread_name}: Thread started for MKJ symbol")
+        iteration_count = 0
+        
+        while not self._thread_stop_event.is_set():
+            try:
+                pass
+            
+            except Exception as e:
+                print(f"{thread_name}: Error: {e}")
+            
+            # Check stop flag before sleep
+            if self._thread_stop_event.is_set():
+                break
+                
+            time.sleep(1.0)
+            
+        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
+    
+    def _run_akim_akav_bot(self, bot):
+        """Run the AKIM/AKAV compute bot in a dedicated thread"""
+        thread_name = threading.current_thread().name
+        print(f"{thread_name}: Thread started for AKIM and AKAV symbols")
+        iteration_count = 0
+        
+        while not self._thread_stop_event.is_set():
+            try:
+                pass
+            
+            except Exception as e:
+                print(f"{thread_name}: Error: {e}")
+            
+            # Check stop flag before sleep
+            if self._thread_stop_event.is_set():
+                break
+                
+            time.sleep(1.0)
+            
+        print(f"{thread_name}: Thread stopping after {iteration_count} iterations")
+    
 
     async def handle_book_update(self, msg, index) -> None:
         """
@@ -315,7 +427,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
         
         # index seems to continue increasing, confused as to why if coming from server
         # the rounds still ends after some random time just increasing index number.
-        if msg.index >= 530000 and self.plot is False:
+        if msg.index >= 240000 and self.plot is False:
             xchange_client._LOGGER.info(msg.index)
             xchange_client._LOGGER.info("plotting best bid ask")
             print(self.stock_LOB_timeseries)
