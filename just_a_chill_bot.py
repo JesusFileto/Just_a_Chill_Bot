@@ -332,18 +332,27 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 timestamp = df["timestamp"].to_list()
                 best_bid_px = df["best_bid_px"].to_list()
                 best_ask_px = df["best_ask_px"].to_list()
+                bid_ask_spread = [ask - bid for ask, bid in zip(best_ask_px, best_bid_px)]
             
+            plt.subplot(2, 1, 1)
             plt.plot(timestamp, best_bid_px, label="Best Bid Price", linestyle="-",markersize=1)
             plt.plot(timestamp, best_ask_px, label="Best Ask Price", linestyle="-",markersize=1)
 
             plt.legend(["Best Bid Price", "Best Ask Price"])
             plt.grid(True)
             plt.xticks(rotation=45)
-            plt.grid()
+
+            plt.subplot(2, 1, 2)
+            plt.plot(timestamp, bid_ask_spread, label="Bid Ask Spread", linestyle="-", markersize=1)
+            plt.legend("Bid Ask Spread")
+            plt.grid(True)
+            plt.xticks(rotation=45)
 
             # Show plot
             print(f"Saving figure for {symbol}")
+            plt.tight_layout()
             plt.savefig(f"data/best_bid_ask_{symbol}.png")
+            plt.close()
 
     async def trade(self):
         await asyncio.sleep(5)
