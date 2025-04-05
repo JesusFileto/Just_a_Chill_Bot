@@ -278,6 +278,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 await self.compute_bots["AKIM_AKAV"].bot_handle_trade_msg(symbol, price, qty)
             else:
                 await self.compute_bots[symbol].bot_handle_trade_msg(symbol, price, qty)
+    
 
     async def bot_handle_book_update(self, symbol: str):
         if symbol in self.stock_LOB_timeseries:
@@ -295,6 +296,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
         timestamp = news_release["timestamp"] # This is in exchange ticks not ISO or Epoch
         news_type = news_release['kind']
         news_data = news_release["new_data"]
+        
+        print(news_data)
 
         if news_type == "structured":
             subtype = news_data["structured_subtype"]
@@ -303,20 +306,15 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 
                 earnings = news_data["value"]
 
-                # Do something with this data
-
+                self.compute_bots["APT"].earnings_update(earnings)
+                
             else:
-
-             
                 new_signatures = news_data["new_signatures"]
                 cumulative = news_data["cumulative"]
-
-                # Do something with this data
+                self.compute_bots["DLR"].signature_update(new_signatures, cumulative)
         else:
-
-            # Not sure what you would do with unstructured data....
-
-            pass
+            for bot in self.compute_bots:
+                bot.unstructured_update(news_data)
     
 
     async def plot_best_bid_ask(self):
