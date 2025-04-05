@@ -16,11 +16,19 @@ class APTBot(Compute):
         self.fair_value = None
         self.spread = None 
         self.pe_ratio = 10 # for practice rounds
-        self.S0 = None 
+
+        # Avellaneda–Stoikov parameters 
+        self.T = 15 * 60 # 15 minute horizon 
+        self.S0 = 100
         self.deltaBid = None 
-        self.deltaAsk = None
-        self.lambda_bid = None
-        self.lambda_ask = None
+        self.deltaAsk = None 
+        self.A = 0.05 
+        self.sigma = self.S0 * 0.02 
+        self.k = math.log(2) / 0.01
+        self.q_tilde = 100 
+        self.gamma = 0.01 / self.q_tilde
+        self.n_steps = int(self.T)
+        self.n_paths = 500 
         
     def calc_bid_ask_spread(self):
         
@@ -32,35 +40,36 @@ class APTBot(Compute):
             return None 
         
         self.spread = best_ask - best_bid 
+        return self.spread
 
-    def calc_bid_ask_price(self, symbol=None, df=None):
+    def calc_bid_ask_price(self, t):
         """Override with APT-specific spread calculation"""
-        bid_price = self.calc_reservation_price() - (self.spread / 2)
-        ask_price = self.calc_reservation_price() + (self.spread / 2)
-        return bid_price, ask_price
-        
-    def calc_reservation_price(self, symbol=None, df=None):
-        """We use the avellinda stoikov model to calculate the reservation price for 
-        interday trading p_{\ text{mm}} = s - q \cdot \gamma \sigma^2 (T - t)"""
-        self.A = 0.05 
-        self.sigma = self.S0 * 0.02 / math.sqrt(1)
-        self.k = math.log(2) / 0.01
-        self.q_tilde = 100 
-        self.gamma = 0.01 / self.q_tilde
-        self.n_steps = int(self.T)
-        self.n_paths = 500 
-        self.h = 15 * 60 
 
-        book = super().client.order_books["APT"]
         positions = super().client.positions["APT"]
 
-        self.deltaBid = max(0.5 * self.gamma * self.sigma ** 2 * self.T + 1 / self.gamma * math.log(
-            1 + self.gamma / self.k) + self.gamma * self.sigma ** 2 * self.T * positions, 0)
-        self.deltaAsk = max(0.5 * self.gamma * self.sigma ** 2 * self.T + 1 / self.gamma * math.log(
-            1 + self.gamma / self.k) - self.gamma * self.sigma ** 2 * self.T * positions, 0)
+        constant_term = (1 / self.gamma) * math.log(1 + self.gamma / self.k) 
+
+        self.deltaBid = max(self.gamma * (self.sigma ** 2) * self.T * (positions + 0.5) + constant_term, 0)
+        self.deltaAsk = max(-self.gamma * (self.sigma ** 2) * self.T * (positions - 0.5) + constant_term, 0)
+    
+        bid_price = self.calc_reservation_price(t) - self.deltaBid
+        ask_price = self.calc_reservation_price(t) + self.deltaAsk
+    
+        return bid_price, ask_price
         
-        self.lambda_bid = self.A * math.exp(-self.k * self.delta_bid)
-        self.lambda_ask = self.A * math.exp(-self.k * self.delta_ask)
+    def calc_reservation_price(self, t):
+        """We use the avellinda stoikov model to calculate the reservation price for 
+        interday trading p_{\ text{mm}} = s - q \cdot \gamma \sigma^2 (T - t)"""
+
+        if self.S0 is None or self.S0 == 0: 
+            self.S0 = self.get_fair_value() or 100.0 # fall back value
+        dt = self.T - t # t is the current time stamp 
+
+        positions = super().client.positions()
+
+        reservation_price = self.S0 - positions * self.gamma * self.sigma**2 * dt
+
+        return reservation_price
     
     def calc_fair_value(self):
         if self.earnings is None: 
@@ -71,6 +80,5 @@ class APTBot(Compute):
         self.earnings = earnings 
         self.calc_fair_value()
         
-
     def get_fair_value(self): 
         return self.fair_value 
