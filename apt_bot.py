@@ -61,7 +61,16 @@ class APTBot(Compute):
         
         self.lambda_bid = self.A * math.exp(-self.k * self.delta_bid)
         self.lambda_ask = self.A * math.exp(-self.k * self.delta_ask)
-
     
     def calc_fair_value(self):
+        if self.earnings is None: 
+            return 
         self.fair_value = self.earnings / self.pe_ratio 
+
+    def handle_earnings_update(self, earnings):  
+        self.earnings = earnings 
+        self.calc_fair_value()
+        
+
+    def get_fair_value(self): 
+        return self.fair_value 
