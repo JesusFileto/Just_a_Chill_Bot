@@ -45,15 +45,15 @@ class APTBot(Compute):
     def calc_bid_ask_price(self, t):
         """Override with APT-specific spread calculation"""
 
-        positions = super().client.positions["APT"]
+        positions = self.parent_client.positions.get("APT", 0)
 
         constant_term = (1 / self.gamma) * math.log(1 + self.gamma / self.k) 
 
         self.deltaBid = max(self.gamma * (self.sigma ** 2) * self.T * (positions + 0.5) + constant_term, 0)
         self.deltaAsk = max(-self.gamma * (self.sigma ** 2) * self.T * (positions - 0.5) + constant_term, 0)
     
-        bid_price = self.calc_reservation_price(t) - self.deltaBid
-        ask_price = self.calc_reservation_price(t) + self.deltaAsk
+        bid_price = int(self.calc_reservation_price(t) - self.deltaBid ) * 10
+        ask_price = int(self.calc_reservation_price(t) + self.deltaAsk) * 10
     
         return bid_price, ask_price
         
@@ -65,7 +65,7 @@ class APTBot(Compute):
             self.S0 = self.get_fair_value() or 100.0 # fall back value
         dt = self.T - t # t is the current time stamp 
 
-        positions = super().client.positions()
+        positions = self.parent_client.positions.get("APT", 0)
 
         reservation_price = self.S0 - positions * self.gamma * self.sigma**2 * dt
 

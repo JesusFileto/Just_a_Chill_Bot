@@ -349,21 +349,20 @@ class MyXchangeClient(xchange_client.XChangeClient):
             plt.close()
 
     async def trade(self):
-        await asyncio.sleep(5)
+        await asyncio.sleep(15)
         print("attempting to trade")
-        await self.place_order("APT",3, xchange_client.Side.BUY, 5)
-        await self.place_order("APT",3, xchange_client.Side.SELL, 7)
+        # buy 20 shares of APT
+        await self.place_order("APT",1, xchange_client.Side.BUY, int(9))
         await asyncio.sleep(5)
-        await self.cancel_order(list(self.open_orders.keys())[0])
-        await self.place_swap_order('toAKAV', 1)
-        await asyncio.sleep(5)
-        await self.place_swap_order('fromAKAV', 1)
-        await asyncio.sleep(5)
-        await self.place_order("APT",1000, xchange_client.Side.SELL, 7)
-        await asyncio.sleep(5)
-        market_order_id = await self.place_order("APT",10, xchange_client.Side.SELL)
-        print("MARKET ORDER ID:", market_order_id)
-        await asyncio.sleep(5)
+        with self._lock: 
+            latest_timestamp = self.stock_LOB_timeseries["APT"].select("timestamp").max().item()
+            print("type of latest_timestamp: ", type(latest_timestamp))
+            bid_price, ask_price = self.compute_bots["APT"].calc_bid_ask_price(latest_timestamp)
+        
+        print("Adjusted Bid Price:", bid_price)
+        await self.place_order("APT",self.compute_bots["APT"].q_tilde, xchange_client.Side.BUY, bid_price)
+        print("Adjusted Ask Price:", ask_price)
+        await self.place_order("APT",self.compute_bots["APT"].q_tilde, xchange_client.Side.SELL, ask_price)
         print("my positions:", self.positions)
 
     async def view_books(self):
@@ -417,13 +416,14 @@ class MyXchangeClient(xchange_client.XChangeClient):
                     # Thread-safe update to the timeseries
                     with self._lock:
                         self.stock_LOB_timeseries[symbol] = pl.concat([
-                            self.stock_LOB_timeseries[symbol], 
                             new_row
                         ])
 
     async def start(self, user_interface):
         # Start compute threads
         self.start_compute_threads()
+        asyncio.create_task(self.trade())
+        asyncio.create_task(self.view_books())
         
         # This is where Phoenixhood will be launched if desired.
         if user_interface:
