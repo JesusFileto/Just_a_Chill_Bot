@@ -29,6 +29,7 @@ class ComputeThread(threading.Thread):
         self.message_queue = queue
         self.stop_event = threading.Event()
         self.loop = None
+        start_time = int(time.time())  # Changed from milliseconds to seconds
         
     def run(self):
         """Run the asyncio event loop in this thread"""
@@ -378,7 +379,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 # Create a new row with the first 3 levels of bids and asks
                 if symbol in self.stock_LOB_timeseries:
                     # Get current timestamp
-                    current_time = int(time.time() * 1000)  # Convert to milliseconds
+                    current_time = int(time.time()) - self.start_time 
                     
                     # Create row data with first 3 levels
                     row_data = {
