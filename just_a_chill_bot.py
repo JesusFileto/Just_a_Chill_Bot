@@ -306,14 +306,14 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 
                 earnings = news_data["value"]
 
-                self.compute_bots["APT"].earnings_update(earnings)
+                self.compute_bots["APT"].handle_earnings_update(earnings)
                 
             else:
                 new_signatures = news_data["new_signatures"]
                 cumulative = news_data["cumulative"]
                 self.compute_bots["DLR"].signature_update(new_signatures, cumulative)
         else:
-            for bot in self.compute_bots:
+            for bot in self.compute_bots.values():
                 bot.unstructured_update(news_data)
     
 
