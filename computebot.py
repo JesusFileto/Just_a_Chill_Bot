@@ -26,9 +26,6 @@ class Compute:
         pass
     
     async def bot_handle_trade_msg(self, symbol: str, price: int, qty: int):
-        """
-        Handle trade messages and optionally send data back to the parent client
-        """
         pass
         
     def increment_trade(self):

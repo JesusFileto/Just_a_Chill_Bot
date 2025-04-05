@@ -2,12 +2,15 @@ from computebot import Compute
 import polars as pl
 import numpy as np
 import math 
+import time
 
 class APTBot(Compute):
     """Specialized bot for APT symbol"""
     
     def __init__(self, parent_client=None):
+        
         super().__init__(parent_client)
+        print(parent_client)
         self.symbol = "APT"
         self.earnings = None
         self.fair_value = None
@@ -20,9 +23,10 @@ class APTBot(Compute):
         self.lambda_ask = None
         
     def calc_bid_ask_spread(self):
-        book = super().client.order_books["APT"]
-        best_bid = max(book.bid.keys()) if book.bids else None 
-        best_ask = min(book.ask.keys()) if book.ask else None 
+        
+        book = self.parent_client.order_books["APT"]
+        best_bid = max(book.bids.keys()) if book.bids else None 
+        best_ask = min(book.asks.keys()) if book.asks else None 
 
         if best_bid is None or best_ask is None: 
             return None 
