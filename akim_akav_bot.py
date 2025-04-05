@@ -5,8 +5,8 @@ import numpy as np
 class AKIMAKAVBot(Compute):
     """Specialized bot for AKIM and AKAV symbols"""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent_client=None):
+        super().__init__(parent_client)
         # This bot handles both AKIM and AKAV
         self.symbols = ["AKIM", "AKAV"]
         # Track correlation between the two symbols

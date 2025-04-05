@@ -5,8 +5,8 @@ import numpy as np
 class DLRBot(Compute):
     """Specialized bot for DLR symbol"""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent_client=None):
+        super().__init__(parent_client)
         self.symbol = "DLR"
         self.volatility = None
         

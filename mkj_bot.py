@@ -5,8 +5,8 @@ import numpy as np
 class MKJBot(Compute):
     """Specialized bot for MKJ symbol"""
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent_client=None):
+        super().__init__(parent_client)
         self.symbol = "MKJ"
         self.price_levels = []  # Track significant price levels
         
