@@ -41,7 +41,7 @@ class APTBot(Compute):
         
     def calc_reservation_price(self, symbol=None, df=None):
         """We use the avellinda stoikov model to calculate the reservation price for 
-        interday trading p_{\text{mm}} = s - q \cdot \gamma \sigma^2 (T - t)"""
+        interday trading p_{\ text{mm}} = s - q \cdot \gamma \sigma^2 (T - t)"""
         self.A = 0.05 
         self.sigma = self.S0 * 0.02 / math.sqrt(1)
         self.k = math.log(2) / 0.01
