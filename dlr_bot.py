@@ -9,6 +9,12 @@ class DLRBot(Compute):
         super().__init__(parent_client)
         self.symbol = "DLR"
         self.volatility = None
+        self.new_signatures = None
+        self.cumulative = None
+        
+    def signature_update(self, new_signatures, cumulative):
+        self.new_signatures = new_signatures
+        self.cumulative = cumulative
         
     def calc_bid_ask_spread(self, symbol=None, df=None):
         """Override with DLR-specific spread calculation"""

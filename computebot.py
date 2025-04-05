@@ -1,6 +1,7 @@
 # imports 
 import polars as pl
 import numpy as np
+import asyncio
 # super class for all compute bots
 class Compute: 
 
@@ -14,24 +15,17 @@ class Compute:
     def calc_fair_value(): 
         pass 
     
-    async def process_update(self, index):
-        """
-        Process an update for this bot.
-        This is the main method called when new data is received.
-        Each bot subclass should override this to implement specialized behavior.
-        """
-        pass
-    
-    async def handle_trade_msg(self, msg, index):
-        pass
-    
     async def bot_handle_trade_msg(self, symbol: str, price: int, qty: int):
         pass
+    
         
     def increment_trade(self):
         pass
         
-    def send_to_parent(self, message_type, data):
+    def unstructured_update(self, news_data):
+        pass
+        
+    async def send_to_parent(self, message_type, data):
         """
         Send data back to the parent client
         """
