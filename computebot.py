@@ -32,6 +32,10 @@ class Compute:
     async def handle_trade(self):
         pass
     
+    def calc_volatility(self):
+        garch = self.garch_neg_loglik(self.omega, self.alpha, self.beta)
+        self.fit_garch(garch)
+        
     # GARCH for volatility 
     def garch_neg_loglik(self, params):
         # Unpack parameters
@@ -64,13 +68,13 @@ class Compute:
         self.sigma = sigma2[T]
         return neg_loglik
 
-    def fit_garch(self):
+    def fit_garch(self, garch_neg_loglik):
         # Initial guess for parameters
         initial_guess = [0.01, 0.05, 0.94]
         bounds = [(1e-8, None), (0, 1), (0, 1), (None, None)]
         
         # Perform optimization
-        result = minimize(self.garch_neg_loglik, initial_guess, bounds=bounds, method='Nelder-Mead')
+        result = minimize(garch_neg_loglik, initial_guess, bounds=bounds, method='Nelder-Mead')
         
         # Extract optimized parameters
         self.omega = result.x[0]
