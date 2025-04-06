@@ -107,7 +107,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
     
     pnl_timeseries = pl.DataFrame(schema={
         "timestamp": pl.Int64,
-        "pnl": pl.Int64
+        "pnl": pl.Int64,
+        "is_unstructured_news_event": pl.Int64
     })
     
     stock_LOB_timeseries = { 
@@ -543,7 +544,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             current_time = int(time.time()) - self.start_time
             pnl_row = pl.DataFrame([{
                 "timestamp": current_time,
-                "pnl": int(pnl)
+                "pnl": int(pnl),
+                "is_unstructured_news_event": 0
             }])
             
             with self._lock:
@@ -559,9 +561,17 @@ class MyXchangeClient(xchange_client.XChangeClient):
         with self._lock:
             timestamp = self.pnl_timeseries["timestamp"].to_list()
             pnl = self.pnl_timeseries["pnl"].to_list()
+            unstructed_news_timestamps = self.pnl_timeseries["is_unstructured_news_event"].to_list()
             
         plt.plot(timestamp, pnl, label="PnL", linestyle="-", markersize=1)
-        plt.legend(["PnL"])
+
+        news_events = self.pnl_timeseries.filter(pl.col("is_unstructured_news_event") == 1)
+        
+        # Add vertical lines for important timestamp
+        for ts in news_events["timestamp"].to_list():
+            plt.axvline(x=ts, color='r', linestyle='--', alpha=0.5)
+        
+        plt.legend()
         plt.grid(True)
         plt.xticks(rotation=45)
         plt.title("Total PnL (Realized + Unrealized)")

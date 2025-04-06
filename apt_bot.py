@@ -93,7 +93,7 @@ class APTBot(Compute):
         ask_price = int((reservation_price + spread / 2) * 100)
         #print("spead ver. ask price: ", ask_price )
 
-        return bid_price, ask_price
+        return delta_bid_price, delta_ask_price
         
     def calc_reservation_price(self, t):
         """We use the avellinda stoikov model to calculate the reservation price for 
@@ -147,5 +147,11 @@ class APTBot(Compute):
             
             
     def unstructured_update(self, news_data):
-        pass 
+        with self.parent_client._lock:
+            self.parent_client.pnl_timeseries = self.parent_client.pnl_timeseries.with_columns(
+                pl.when(pl.col("timestamp") == pl.col("timestamp").max())
+                .then(1)
+                .otherwise(pl.col("is_unstructured_news_event"))
+                .alias("is_unstructured_news_event")
+            )
     
