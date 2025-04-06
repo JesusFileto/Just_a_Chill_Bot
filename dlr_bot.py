@@ -19,6 +19,7 @@ class DLRBot(Compute):
         self.log_alpha = np.log(self.alpha)  # Log growth factor
         self.sigma = 0.006  # Volatility
         self.S_star = 100000  # Success threshold
+        self.log_S_star = np.log(self.S_star)
         self.T = 50  # Total time periods (deadline)
         self.update_counter = 0
         
@@ -51,15 +52,14 @@ class DLRBot(Compute):
         # Using the formula: p_t = 1 - Φ((ln(S*) - ln(S_t) - ln(α)(T-t)) / (σ√(T-t)))
         
         # Calculate the numerator of the z-score
-        numerator = np.log(self.S_star) - np.log(self.current_signatures) - self.log_alpha * time_remaining
+        numerator = self.log_S_star - np.log(self.current_signatures) - time_remaining * self.log_alpha
         
         print("numerator: ", numerator)
-        print("self.S_star: ", self.S_star)
-        print("self.current_signatures: ", self.current_signatures)
-        print("self.log_alpha: ", self.log_alpha)
+        print("self.S_star: ", self.log_S_star)
+        print("self.current_signatures: ", np.log(self.current_signatures))
+        print("self.log_alpha: ", time_remaining * self.log_alpha)
         print("time_remaining: ", time_remaining)
         print("self.sigma: ", self.sigma)
-        print("self.T: ", self.T)   
         print("log ", np.log(self.current_signatures) - self.log_alpha * time_remaining)
         
         # Calculate the denominator of the z-score
@@ -68,7 +68,7 @@ class DLRBot(Compute):
         print("denominator: ", denominator)
         
         # Calculate the z-score
-        z_score = abs(numerator / denominator)
+        z_score = numerator / denominator
         
         print("z_score: ", z_score)
         

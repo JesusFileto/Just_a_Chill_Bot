@@ -6,12 +6,29 @@ import time
 
 
 class MKJBot(Compute):
-    """Specialized bot for MKJ symbol with high volatility and order book dynamics"""
+    """Specialized bot for MKJ symbol"""
     
     def __init__(self, parent_client=None):
         super().__init__(parent_client)
         self.symbol = "MKJ"
-        self.price_levels = []  # Track significant price levels
+        self.trade_count = 0
+        self.fair_value = None
+        self.fair_value_timeseries = pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "fair_value": pl.Float64,
+            "midpoint": pl.Float64
+        })
+        
+        # Order book tracking
+        
+        # Order book imbalance tracking with Polars
+        self.imbalance_timeseries = pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "imbalance": pl.Float64,
+            "bid_volume": pl.Int64,
+            "ask_volume": pl.Int64
+        })
+        
         
         # Volatility calculation
         self.volatility_window = 20  # Window for volatility calculation
@@ -20,16 +37,12 @@ class MKJBot(Compute):
         # Regression parameters
         self.alpha = 0.0  # Spread coefficient
         self.beta = 0.0   # Order book imbalance coefficient
-        self.regression_window = 50  # Window for regression
+        self.regression_window = 10  # Window for regression
         
         # Fair value calculation parameters
         self.k_factor = 1.5  # Confidence interval factor
         self.min_spread = 0.1  # Minimum spread to consider
         self.max_spread = 5.0  # Maximum spread to consider
-        
-        # Order book imbalance tracking
-        self.bid_volume = 0
-        self.ask_volume = 0
         
     def calc_bid_ask_spread(self):
         """
@@ -58,30 +71,44 @@ class MKJBot(Compute):
         Returns:
             float: Fair value of MKJ
         """
+        historical_midpoints = None
+        historical_spreads = None
+        imbalance = self._calculate_order_book_imbalance()
+        with self.parent_client._lock:
+            historical_midpoints = self.parent_client.stock_LOB_timeseries["MKJ"]["mid_price"]
+            historical_spreads = self.parent_client.stock_LOB_timeseries["MKJ"]["spread"]
+        
+        
         # If we don't have enough data, return a default value
-        if len(self.historical_midpoints) < 5:
-            return 50.0  # Default to midpoint of possible range
+        if len(historical_midpoints) == 0:
+            return 50.0
+        if len(historical_midpoints) < 5:
+            #mark return value as last value in historical_midpoints
+            return historical_midpoints[-1]
+        
         
         # Get the current midpoint
-        current_midpoint = self.historical_midpoints[-1] if self.historical_midpoints else 50.0
+        current_midpoint = historical_midpoints[-1] if historical_midpoints.is_empty() is False else 50.0
+        print("current_midpoint: ", current_midpoint)
         
-        # Calculate order book imbalance
-        imbalance = self._calculate_order_book_imbalance()
         
-        # Calculate spread impact
-        current_spread = self.historical_spreads[-1] if self.historical_spreads else 1.0
-        avg_spread = np.mean(self.historical_spreads) if self.historical_spreads else 1.0
+        # Convert historical spreads to numpy array if not empty
+        historical_spreads_np = historical_spreads.to_numpy() if not historical_spreads.is_empty() else None
+        
+        # Calculate spread impact using numpy array
+        current_spread = historical_spreads_np[-1] if historical_spreads_np is not None else 1.0
+        avg_spread = np.mean(historical_spreads_np) if historical_spreads_np is not None else 1.0
         spread_ratio = current_spread / avg_spread if avg_spread > 0 else 1.0
-        
-        # Calculate VWAP from recent trades
-        vwap = self._calculate_vwap()
+
+
         
         # Calculate volatility-adjusted fair value
         # Fair value = midpoint + alpha*spread_change + beta*imbalance
         spread_change = spread_ratio - 1.0  # Normalized spread change
         
         # Apply regression coefficients if available
-        if len(self.historical_midpoints) >= self.regression_window:
+        if len(historical_midpoints) >= self.regression_window:
+            self._update_regression_parameters(historical_midpoints, historical_spreads)
             fair_value = current_midpoint + self.alpha * spread_change + self.beta * imbalance
         else:
             # Simple heuristic if we don't have enough data for regression
@@ -89,121 +116,147 @@ class MKJBot(Compute):
         
         # Apply confidence bands based on volatility
         # Fair value is within [fair_value - k*volatility, fair_value + k*volatility]
-        lower_band = fair_value - self.k_factor * self.volatility
-        upper_band = fair_value + self.k_factor * self.volatility
+        # lower_band = fair_value - self.k_factor * self.volatility
+        # upper_band = fair_value + self.k_factor * self.volatility
         
         # Ensure fair value is within reasonable bounds
-        fair_value = max(0, min(100, fair_value))
+        fair_value = max(0, min(5000, fair_value))
         
-        # If VWAP is available, use it as a sanity check
-        if vwap is not None:
-            # Blend VWAP with our calculated fair value
-            fair_value = 0.7 * fair_value + 0.3 * vwap
-        
+        print("fair_value MKJ: ", fair_value)
+        self._update_fair_value_timeseries(fair_value, current_midpoint)
         return fair_value
+    
+    def _update_fair_value_timeseries(self, fair_value, midpoint):
+        """
+        Update the fair value timeseries with a new snapshot
+        """
+        timestamp = self.parent_client.stock_LOB_timeseries[self.symbol]["timestamp"].tail(1).item()
+        new_row = pl.DataFrame([{
+            "timestamp": timestamp,
+            "fair_value": fair_value,
+            "midpoint": midpoint
+        }])
+        self.fair_value_timeseries = pl.concat([self.fair_value_timeseries, new_row])
     
     def _calculate_order_book_imbalance(self):
         """
-        Calculate the order book imbalance
+        Calculate the order book imbalance using the parent client's LOB_timeseries
         
         Returns:
             float: Order book imbalance between -1 and 1
         """
-        total_volume = self.bid_volume + self.ask_volume
+            
+        # Get the LOB timeseries from the parent client
+        lob_df = self.parent_client.stock_LOB_timeseries["MKJ"]
+        
+        # If the timeseries is empty, return 0
+        if len(lob_df) == 0:
+            return 0.0
+            
+        # Get the last row of the timeseries
+        last_row = lob_df.tail(1)
+        
+        # Calculate total bid volume from all 4 price levels
+        bid_volume = (
+            last_row["best_bid_qt"].item() +  # Level 1
+            last_row["2_bid_qt"].item() +     # Level 2
+            last_row["3_bid_qt"].item() +     # Level 3
+            last_row["4_bid_qt"].item()       # Level 4
+        )
+        
+        # Calculate total ask volume from all 4 price levels
+        ask_volume = (
+            last_row["best_ask_qt"].item() +  # Level 1
+            last_row["2_ask_qt"].item() +     # Level 2
+            last_row["3_ask_qt"].item() +     # Level 3
+            last_row["4_ask_qt"].item()       # Level 4
+        )
+        
+        # Calculate total volume
+        total_volume = bid_volume + ask_volume
         if total_volume == 0:
             return 0.0
         
         # Imbalance is (bid_volume - ask_volume) / (bid_volume + ask_volume)
-        return (self.bid_volume - self.ask_volume) / total_volume
+        imbalance = (bid_volume - ask_volume) / total_volume
+        timestamp = self.parent_client.stock_LOB_timeseries[self.symbol]["timestamp"].tail(1).item()
+        #print("imbalance: ", imbalance)
+        self._update_imbalance_timeseries(timestamp, imbalance, bid_volume, ask_volume)
+        return imbalance
     
-    def _calculate_vwap(self):
+    def _update_imbalance_timeseries(self, timestamp, imbalance, bid_volume, ask_volume):
         """
-        Calculate the Volume Weighted Average Price from recent trades
+        Update the imbalance timeseries with a new snapshot
         
-        Returns:
-            float: VWAP or None if no trades
+        Args:
+            timestamp: Current timestamp
+            imbalance: Calculated order book imbalance
+            bid_volume: Total bid volume
+            ask_volume: Total ask volume
         """
-        if not self.recent_trades:
-            return None
+        # Create a new row
+        new_row = pl.DataFrame([{
+            "timestamp": timestamp,
+            "imbalance": imbalance,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume
+        }])
         
-        total_volume = sum(trade['volume'] for trade in self.recent_trades)
-        if total_volume == 0:
-            return None
-        
-        vwap = sum(trade['price'] * trade['volume'] for trade in self.recent_trades) / total_volume
-        return vwap
+        # Append to the timeseries
+        #print("new_row: ", new_row)
+        self.imbalance_timeseries = pl.concat([self.imbalance_timeseries, new_row])
     
-    def _update_volatility(self):
+   
+    
+    def _update_regression_parameters(self, historical_midpoints, historical_spreads):
         """
-        Update the volatility calculation
+        Update the regression parameters alpha and beta using fast OLS
         """
-        if len(self.trade_prices) < 2:
+        if len(historical_midpoints) < self.regression_window:
             return
         
-        # Calculate returns
-        returns = np.diff(list(self.trade_prices)) / list(self.trade_prices)[:-1]
-        
-        # Calculate volatility as standard deviation of returns
-        if len(returns) >= self.volatility_window:
-            # Use the most recent volatility_window returns
-            recent_returns = returns[-self.volatility_window:]
-            self.volatility = np.std(recent_returns)
-        else:
-            # Use all available returns
-            self.volatility = np.std(returns) if len(returns) > 0 else 0.0
-    
-    def _update_regression_parameters(self):
-        """
-        Update the regression parameters alpha and beta
-        """
-        if len(self.historical_midpoints) < self.regression_window:
-            return
-        
-        # Prepare data for regression
-        midpoints = np.array(list(self.historical_midpoints))
-        spreads = np.array(list(self.historical_spreads))
+        # Prepare data for regression using last regression_window points
+        midpoints = np.array(list(historical_midpoints[-self.regression_window:]))
+        spreads = np.array(list(historical_spreads[-self.regression_window:]))
         
         # Calculate changes
         delta_midpoints = np.diff(midpoints)
         delta_spreads = np.diff(spreads)
         
-        # Calculate order book imbalances
-        imbalances = []
-        for i in range(1, len(midpoints)):
-            # This is a simplification - in reality, we'd need historical order book data
-            # For now, we'll use a placeholder
-            imbalances.append(0.0)
+        # Get historical imbalances from the timeseries
+        if len(self.imbalance_timeseries) >= self.regression_window:
+            # Use the most recent imbalances
+            imbalances = self.imbalance_timeseries.select("imbalance").tail(self.regression_window-1).to_series().to_numpy()
+        else:
+            # If we don't have enough imbalance data, use zeros
+            imbalances = np.zeros(self.regression_window-1)
+            
+        # print("midpoints: ", midpoints)
+        # print("spreads: ", spreads)
+        # print("imbalances: ", imbalances)
+        # print("delta_midpoints: ", delta_midpoints)
+        # print("delta_spreads: ", delta_spreads)
         
         # Prepare X matrix (spread changes and imbalances)
-        X = np.column_stack((delta_spreads[:-1], imbalances))
+        X = np.column_stack((delta_spreads, imbalances))
         
         # Prepare y vector (midpoint changes)
-        y = delta_midpoints[1:]
+        y = delta_midpoints
         
         # Perform regression if we have enough data
         if len(X) > 0 and len(y) > 0 and len(X) == len(y):
             try:
-                # Use numpy's polyfit for simple linear regression
-                coefficients = np.polyfit(X[:, 0], y, 1)
-                self.alpha = coefficients[0]
-                
-                # If we have imbalance data, fit that too
-                if X.shape[1] > 1:
-                    coefficients = np.polyfit(X[:, 1], y, 1)
-                    self.beta = coefficients[0]
+                # Use numpy's lstsq for fast and stable OLS
+                beta_hat = np.linalg.lstsq(X, y, rcond=None)[0]
+                self.alpha = beta_hat[0]  # Coefficient for spread changes
+                self.beta = beta_hat[1]   # Coefficient for imbalances
+                print("alpha: ", self.alpha)
+                print("beta: ", self.beta)
             except:
                 # If regression fails, use default values
                 self.alpha = 0.1
                 self.beta = 0.2
     
-    def _update_support_resistance(self):
-        """
-        Identify support and resistance levels for MKJ
-        """
-        # This would analyze price action to identify key levels
-        # For now, we'll use a simple placeholder
-        pass
-
     async def process_update(self, update):
         """
         Process updates from the parent client
@@ -215,43 +268,26 @@ class MKJBot(Compute):
         # It would process updates and calculate new fair values
         pass
     
-    async def bot_handle_trade_msg(self, symbol, price, qty):
-        """
-        Handle trade messages
-        
-        Args:
-            symbol: The trading symbol
-            price: The trade price
-            qty: The trade quantity
-        """
-        # Record the trade
-        self.recent_trades.append({
-            'price': price,
-            'volume': qty,
-            'timestamp': time.time()
-        })
-        
-        # Update trade prices for volatility calculation
-        self.trade_prices.append(price)
-        
-        # Update volatility
-        self._update_volatility()
-        
-        # Send the trade message back to the parent
-        if self.parent_client:
-            await self.send_to_parent("trade", {
-                "symbol": symbol,
-                "price": price,
-                "qty": qty
-            })
     
     def increment_trade(self):
         """
         Increment the trade counter
         """
-        # For MKJ, we might want to update our model based on trades
-        pass
-
-    async def process_update(self, index):
-        """Override for MKJ-specific update processing"""
+        # For MKJ, we want to only update our model based on a new LOB snapshot
+        # do we want to perform a trade after a fixed number of trades or time interval?
+        self.trade_count += 1
+        
+    def handle_snapshot(self):
+        print("handle_snapshot")
+        self.fair_value = self.calc_fair_value()
+        
+    
+    def unstructured_update(self, news_data):
+        """
+        Handle unstructured news updates
+        
+        Args:
+            news_data: The news data
+        """
+        # For MKJ, we might want to update our model based on news
         pass

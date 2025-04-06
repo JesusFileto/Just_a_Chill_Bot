@@ -121,7 +121,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
             "spread": pl.Int64,
-            "mid_price": pl.Int64,
+            "mid_price": pl.Float64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -142,7 +142,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
             "spread": pl.Int64,
-            "mid_price": pl.Int64,
+            "mid_price": pl.Float64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -163,7 +163,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
             "spread": pl.Int64,
-            "mid_price": pl.Int64,
+            "mid_price": pl.Float64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -184,7 +184,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
             "spread": pl.Int64,
-            "mid_price": pl.Int64,
+            "mid_price": pl.Float64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -205,7 +205,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
             "spread": pl.Int64,
-            "mid_price": pl.Int64,
+            "mid_price": pl.Float64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -470,7 +470,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     async def view_books(self):
         # Use polars DataFrame for better performance
-        
+        print("viewing books")
         while True:
             await asyncio.sleep(1)
             pnl = self.positions['cash']
@@ -501,8 +501,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
                         "best_ask_qt": sorted_asks[0][1] if sorted_asks else 0,
                     }
                     
-                    row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
-                    row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2
+                    if len(sorted_bids) > 0 and len(sorted_asks) > 0:
+                        row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
+                        row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2
+                    else:
+                        row_data["spread"] = 0
+                        row_data["mid_price"] = float(0)
                     
                     # Add second, third, and fourth levels if available
                     if len(sorted_bids) > 1:
@@ -547,13 +551,15 @@ class MyXchangeClient(xchange_client.XChangeClient):
                     new_row = pl.DataFrame([row_data])
                     
                     #print("new_row: ", new_row)
-                    
                     # Thread-safe update to the timeseries
                     with self._lock:
                         self.stock_LOB_timeseries[symbol] = pl.concat([
                             self.stock_LOB_timeseries[symbol],
                             new_row
                         ])
+                    if symbol == "MKJ":
+                        print("incrementing trade for MKJ")
+                        self.compute_bots["MKJ"].handle_snapshot()
             
             # Update PnL timeseries with total unrealized PnL
             current_time = int(time.time()) - self.start_time
