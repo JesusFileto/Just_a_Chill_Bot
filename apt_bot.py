@@ -4,6 +4,7 @@ import numpy as np
 import math 
 import time
 import asyncio
+from utcxchangelib import xchange_client
 
 class APTBot(Compute):
     """Specialized bot for APT symbol"""
@@ -41,9 +42,9 @@ class APTBot(Compute):
         print("Sorted Bids:", sorted_bids)
         print("Sorted Asks:", sorted_asks)
     
-        best_bid,_ = max(sorted_bids) if book.bids else None 
+        best_bid,_ = max(sorted_bids) if sorted_bids else None 
         print("best bid: ", best_bid)
-        best_ask,_ = min(sorted_asks) if book.asks else None 
+        best_ask,_ = min(sorted_asks) if sorted_asks else None 
         print("best ask: ", best_ask)
 
         if best_bid is None or best_ask is None: 
@@ -125,9 +126,10 @@ class APTBot(Compute):
         return self.fair_value 
     
     async def handle_trade(self):
-        from utcxchangelib import xchange_client
         with self.parent_client._lock: 
-            latest_timestamp = self.parent_client.stock_LOB_timeseries["APT"].select("timestamp").max().item()
+            latest_timestamp = int(time.time()) - self.parent_client.start_time
+            if latest_timestamp is None:
+                return 
             print("type of latest_timestamp: ", type(latest_timestamp))
             bid_price, ask_price = self.calc_bid_ask_price(latest_timestamp)
         print("========================================")
