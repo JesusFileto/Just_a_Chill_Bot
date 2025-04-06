@@ -29,7 +29,6 @@ class ComputeThread(threading.Thread):
         self.message_queue = queue
         self.stop_event = threading.Event()
         self.loop = None
-        start_time = int(time.time())  # Changed from milliseconds to seconds
         
     def run(self):
         """Run the asyncio event loop in this thread"""
@@ -198,6 +197,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "AKIM": queue.Queue(),
             "AKAV": queue.Queue()
         }
+
+        self.start_time = int(time.time())  # Changed from milliseconds to seconds
         
     def start_compute_threads(self):
         """Start separate compute threads, each with its own asyncio event loop"""
@@ -359,7 +360,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             latest_timestamp = self.stock_LOB_timeseries["APT"].select("timestamp").max().item()
             print("type of latest_timestamp: ", type(latest_timestamp))
             bid_price, ask_price = self.compute_bots["APT"].calc_bid_ask_price(latest_timestamp)
-        
+        print("========================================")
         print("Adjusted Bid Price:", bid_price)
         await self.place_order("APT",self.compute_bots["APT"].q_tilde, xchange_client.Side.BUY, bid_price)
         print("Adjusted Ask Price:", ask_price)
