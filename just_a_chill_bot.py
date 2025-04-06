@@ -29,7 +29,7 @@ class ComputeThread(threading.Thread):
         self.message_queue = queue
         self.stop_event = threading.Event()
         self.loop = None
-        
+                
     def run(self):
         """Run the asyncio event loop in this thread"""
         # Create a new event loop for this thread
@@ -105,6 +105,11 @@ class MyXchangeClient(xchange_client.XChangeClient):
     # Thread lock for synchronizing access to shared data
     _lock = threading.Lock()
     
+    pnl_timeseries = pl.DataFrame(schema={
+        "timestamp": pl.Int64,
+        "pnl": pl.Int64
+    })
+    
     stock_LOB_timeseries = { 
         "APT": pl.DataFrame(schema={
             "timestamp": pl.Int64,
@@ -112,14 +117,18 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "2_bid_px": pl.Int64,
+            "2_bid_qt": pl.Int64,
+            "3_bid_px": pl.Int64,
+            "3_bid_qt": pl.Int64,
+            "4_bid_px": pl.Int64,
+            "4_bid_qt": pl.Int64,
             "2_ask_px": pl.Int64,
             "2_ask_qt": pl.Int64,
             "3_ask_px": pl.Int64,
             "3_ask_qt": pl.Int64,
             "4_ask_px": pl.Int64,
             "4_ask_qt": pl.Int64,
-            "5_ask_px": pl.Int64,
-            "5_ask_qt": pl.Int64,
         }),
         "DLR": pl.DataFrame(schema={
             "timestamp": pl.Int64,
@@ -127,6 +136,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "2_bid_px": pl.Int64,
+            "2_bid_qt": pl.Int64,
+            "3_bid_px": pl.Int64,
+            "3_bid_qt": pl.Int64,
+            "4_bid_px": pl.Int64,
+            "4_bid_qt": pl.Int64,
             "2_ask_px": pl.Int64,
             "2_ask_qt": pl.Int64,
             "3_ask_px": pl.Int64,
@@ -140,6 +155,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "2_bid_px": pl.Int64,
+            "2_bid_qt": pl.Int64,
+            "3_bid_px": pl.Int64,
+            "3_bid_qt": pl.Int64,
+            "4_bid_px": pl.Int64,
+            "4_bid_qt": pl.Int64,
             "2_ask_px": pl.Int64,
             "2_ask_qt": pl.Int64,
             "3_ask_px": pl.Int64,
@@ -153,6 +174,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "2_bid_px": pl.Int64,
+            "2_bid_qt": pl.Int64,
+            "3_bid_px": pl.Int64,
+            "3_bid_qt": pl.Int64,
+            "4_bid_px": pl.Int64,
+            "4_bid_qt": pl.Int64,
             "2_ask_px": pl.Int64,
             "2_ask_qt": pl.Int64,
             "3_ask_px": pl.Int64,
@@ -166,6 +193,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "2_bid_px": pl.Int64,
+            "2_bid_qt": pl.Int64,
+            "3_bid_px": pl.Int64,
+            "3_bid_qt": pl.Int64,
+            "4_bid_px": pl.Int64,
+            "4_bid_qt": pl.Int64,
             "2_ask_px": pl.Int64,
             "2_ask_qt": pl.Int64,
             "3_ask_px": pl.Int64,
@@ -180,6 +213,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     def __init__(self, host: str, username: str, password: str):
         super().__init__(host, username, password)
+        self.start_time = int(time.time())  # Changed from milliseconds to seconds
+
         
         # Initialize specialized compute bots with self as parent
         self.compute_bots = {
@@ -366,16 +401,78 @@ class MyXchangeClient(xchange_client.XChangeClient):
         print("Adjusted Ask Price:", ask_price)
         await self.place_order("APT",self.compute_bots["APT"].q_tilde, xchange_client.Side.SELL, ask_price)
         print("my positions:", self.positions)
+        
+    def calculate_unrealized_pnl(self, symbol_position, sorted_bids, sorted_asks):
+        unrealized_pnl = 0
+        if symbol_position > 0:  # Long position
+            # Use best bid price (highest price we could sell at)
+            if sorted_bids:
+                # Calculate weighted average price if position is larger than best bid quantity
+                remaining_position = symbol_position
+                weighted_price = 0
+                total_quantity = 0
+                
+                for bid_price, bid_qty in sorted_bids:
+                    if remaining_position <= 0:
+                        break
+                        
+                    # Use the smaller of the remaining position or the bid quantity
+                    qty_to_use = min(remaining_position, bid_qty)
+                    weighted_price += bid_price * qty_to_use
+                    total_quantity += qty_to_use
+                    remaining_position -= qty_to_use
+                
+                if total_quantity > 0:
+                    avg_price = weighted_price / total_quantity
+                    unrealized_pnl = symbol_position * avg_price
+                else:
+                    # Fallback to best bid if we couldn't calculate a weighted average
+                    unrealized_pnl = symbol_position * sorted_bids[0][0]
+                    
+        elif symbol_position < 0:  # Short position
+            # Use best ask price (lowest price we could buy at)
+            if sorted_asks:
+                # Calculate weighted average price if position is larger than best ask quantity
+                remaining_position = abs(symbol_position)
+                weighted_price = 0
+                total_quantity = 0
+                
+                for ask_price, ask_qty in sorted_asks:
+                    if remaining_position <= 0:
+                        break
+                        
+                    # Use the smaller of the remaining position or the ask quantity
+                    qty_to_use = min(remaining_position, ask_qty)
+                    weighted_price += ask_price * qty_to_use
+                    total_quantity += qty_to_use
+                    remaining_position -= qty_to_use
+                
+                if total_quantity > 0:
+                    avg_price = weighted_price / total_quantity
+                    unrealized_pnl = symbol_position * avg_price
+                else:
+                    # Fallback to best ask if we couldn't calculate a weighted average
+                    unrealized_pnl = symbol_position * sorted_asks[0][0]
+        return unrealized_pnl
 
     async def view_books(self):
         # Use polars DataFrame for better performance
         
         while True:
             await asyncio.sleep(1)
+            pnl = self.positions['cash']
+            
             for symbol, book in self.order_books.items():
                 # Extract prices where quantity > 0 for printing
                 sorted_bids = sorted(((p, q) for p, q in book.bids.items() if q > 0), reverse=True)
                 sorted_asks = sorted((p, q) for p, q in book.asks.items() if q > 0)
+                
+                # Calculate unrealized PnL for this symbol
+                symbol_position = self.positions.get(symbol, 0)
+                unrealized_pnl = self.calculate_unrealized_pnl(symbol_position, sorted_bids, sorted_asks)
+                pnl += unrealized_pnl
+                
+                
                 
                 # Create a new row with the first 3 levels of bids and asks
                 if symbol in self.stock_LOB_timeseries:
@@ -395,31 +492,85 @@ class MyXchangeClient(xchange_client.XChangeClient):
                     if len(sorted_bids) > 1:
                         row_data["2_bid_px"] = sorted_bids[1][0]
                         row_data["2_bid_qt"] = sorted_bids[1][1]
+                    else:
+                        row_data["2_bid_px"] = 0
+                        row_data["2_bid_qt"] = 0
                     if len(sorted_bids) > 2:
                         row_data["3_bid_px"] = sorted_bids[2][0]
                         row_data["3_bid_qt"] = sorted_bids[2][1]
+                    else:
+                        row_data["3_bid_px"] = 0
+                        row_data["3_bid_qt"] = 0
                     if len(sorted_bids) > 3:
                         row_data["4_bid_px"] = sorted_bids[3][0]
                         row_data["4_bid_qt"] = sorted_bids[3][1]
+                    else:
+                        row_data["4_bid_px"] = 0
+                        row_data["4_bid_qt"] = 0
                         
                     if len(sorted_asks) > 1:
                         row_data["2_ask_px"] = sorted_asks[1][0]
                         row_data["2_ask_qt"] = sorted_asks[1][1]
+                    else:
+                        row_data["2_ask_px"] = 0
+                        row_data["2_ask_qt"] = 0   
                     if len(sorted_asks) > 2:
                         row_data["3_ask_px"] = sorted_asks[2][0]
                         row_data["3_ask_qt"] = sorted_asks[2][1]
+                    else:
+                        row_data["3_ask_px"] = 0
+                        row_data["3_ask_qt"] = 0
                     if len(sorted_asks) > 3:
                         row_data["4_ask_px"] = sorted_asks[3][0]
                         row_data["4_ask_qt"] = sorted_asks[3][1]
+                    else:
+                        row_data["4_ask_px"] = 0
+                        row_data["4_ask_qt"] = 0
                     
                     # Create new row DataFrame
                     new_row = pl.DataFrame([row_data])
                     
+                    #print("new_row: ", new_row)
+                    
                     # Thread-safe update to the timeseries
                     with self._lock:
                         self.stock_LOB_timeseries[symbol] = pl.concat([
+                            self.stock_LOB_timeseries[symbol],
                             new_row
                         ])
+            
+            # Update PnL timeseries with total unrealized PnL
+            current_time = int(time.time()) - self.start_time
+            pnl_row = pl.DataFrame([{
+                "timestamp": current_time,
+                "pnl": pnl
+            }])
+            
+            with self._lock:
+                self.pnl_timeseries = pl.concat([
+                    self.pnl_timeseries,
+                    pnl_row
+                ])
+
+    async def plot_pnl(self):
+        plt.figure(figsize=(12, 6))
+        
+        # Thread-safe read of timeseries data
+        with self._lock:
+            timestamp = self.pnl_timeseries["timestamp"].to_list()
+            pnl = self.pnl_timeseries["pnl"].to_list()
+            
+        plt.plot(timestamp, pnl, label="PnL", linestyle="-", markersize=1)
+        plt.legend(["PnL"])
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.title("Total PnL (Realized + Unrealized)")
+        
+        # Show plot
+        print("Saving PnL figure")
+        plt.tight_layout()
+        plt.savefig("data/pnl.png")
+        plt.close()
 
     async def start(self, user_interface):
         # Start compute threads
@@ -437,8 +588,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
         finally:
             # Ensure compute threads are stopped when the main coroutine exits
             self.stop_compute_threads()
-            
-
+        
 
 
 
@@ -454,6 +604,7 @@ async def main(user_interface: bool):
     finally:
         # Plot data at the end of trading
         await my_client.plot_best_bid_ask()
+        await my_client.plot_pnl()
     
     return
 
