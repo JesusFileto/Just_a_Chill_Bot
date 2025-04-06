@@ -33,6 +33,7 @@ class APTBot(Compute):
         self.n_steps = int(self.T)
         self.n_paths = 500 
         
+        
     def calc_bid_ask_spread(self):
         
         book = self.parent_client.order_books["APT"]
@@ -155,3 +156,6 @@ class APTBot(Compute):
                 .alias("is_unstructured_news_event")
             )
     
+    def calc_volatility(self):
+        super().calc_volatility()
+        print("volatility: ", self.sigma)

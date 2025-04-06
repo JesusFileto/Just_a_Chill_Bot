@@ -12,7 +12,7 @@ class Compute:
         self.omega = None
         self.alpha = None
         self.beta = None
-
+        self.sigma = None
     def calc_bid_ask_spread(): 
         pass
 

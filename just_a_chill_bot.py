@@ -29,6 +29,8 @@ class ComputeThread(threading.Thread):
         self.message_queue = queue
         self.stop_event = threading.Event()
         self.loop = None
+        
+    
                 
     def run(self):
         """Run the asyncio event loop in this thread"""
@@ -118,6 +120,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "spread": pl.Int64,
+            "mid_price": pl.Int64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -137,6 +141,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "spread": pl.Int64,
+            "mid_price": pl.Int64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -156,6 +162,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "spread": pl.Int64,
+            "mid_price": pl.Int64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -175,6 +183,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "spread": pl.Int64,
+            "mid_price": pl.Int64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -194,6 +204,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
             "best_ask_qt": pl.Int64,
+            "spread": pl.Int64,
+            "mid_price": pl.Int64,
             "2_bid_px": pl.Int64,
             "2_bid_qt": pl.Int64,
             "3_bid_px": pl.Int64,
@@ -488,6 +500,9 @@ class MyXchangeClient(xchange_client.XChangeClient):
                         "best_ask_px": sorted_asks[0][0] if sorted_asks else 0,
                         "best_ask_qt": sorted_asks[0][1] if sorted_asks else 0,
                     }
+                    
+                    row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
+                    row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2
                     
                     # Add second, third, and fourth levels if available
                     if len(sorted_bids) > 1:
