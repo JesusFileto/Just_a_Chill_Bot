@@ -2,12 +2,16 @@
 import polars as pl
 import numpy as np
 import asyncio
+from scipy.optimize import minimize
 # super class for all compute bots
 class Compute: 
 
-    def __init__(self, parent_client=None): 
+    def __init__(self, parent_client=None, symbol=None): 
         self.parent_client = parent_client
-
+        self.symbol = symbol
+        self.omega = None
+        self.alpha = None
+        self.beta = None
 
     def calc_bid_ask_spread(): 
         pass
@@ -27,6 +31,52 @@ class Compute:
     
     async def handle_trade(self):
         pass
+    
+    # GARCH for volatility 
+    def garch_neg_loglik(self, params):
+        # Unpack parameters
+        omega, alpha, beta = params
+        
+        sigma2 = None
+        with self.parent_client._lock:
+            T = len(self.parent_client.stock_LOB_timeseries[self.symbol]["spread"])
+            sigma2 = np.zeros(T)
+            sigma2[0] = np.var(self.parent_client.stock_LOB_timeseries[self.symbol]["mid_price"])
+        
+        
+        # Initialize negative log-likelihood
+        neg_loglik = 0
+        
+        # Recursively compute the conditional variance and accumulate the log-likelihood
+        for t in range(1, T):
+            # GARCH-X recursion: add the exogenous variable impact at time t
+            
+            returns = self.parent_client.stock_LOB_timeseries[self.symbol]["mid_price"]
+            
+            sigma2[t] = omega + alpha * (returns[t-1]**2) + beta * sigma2[t-1]
+            
+            # To avoid numerical issues, ensure sigma2[t] is positive
+            if sigma2[t] <= 0:
+                return 1e6
+            
+            # Contribution to log-likelihood from observation t, assuming normality and zero mean
+            neg_loglik += 0.5 * (np.log(2 * np.pi) + np.log(sigma2[t]) + (returns[t]**2 / sigma2[t]))
+        self.sigma = sigma2[T]
+        return neg_loglik
+
+    def fit_garch(self):
+        # Initial guess for parameters
+        initial_guess = [0.01, 0.05, 0.94]
+        bounds = [(1e-8, None), (0, 1), (0, 1), (None, None)]
+        
+        # Perform optimization
+        result = minimize(self.garch_neg_loglik, initial_guess, bounds=bounds, method='Nelder-Mead')
+        
+        # Extract optimized parameters
+        self.omega = result.x[0]
+        self.alpha = result.x[1]
+        self.beta = result.x[2]
+        
     
     async def send_to_parent(self, message_type, data):
         """
