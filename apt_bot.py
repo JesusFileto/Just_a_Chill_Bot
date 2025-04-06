@@ -118,6 +118,12 @@ class APTBot(Compute):
         self.earnings = earnings 
         self.calc_fair_value()
         print("handling earnings: ", self.fair_value)
+        self.parent_client.pnl_timeseries = self.parent_client.pnl_timeseries.with_columns(
+            pl.when(pl.col("timestamp") == pl.col("timestamp").max())
+                .then(2)
+                .otherwise(pl.col("is_news_event"))
+                .alias("is_news_event")
+        )
         
     def get_fair_value(self): 
         if self.earnings is None: 
@@ -152,8 +158,8 @@ class APTBot(Compute):
             self.parent_client.pnl_timeseries = self.parent_client.pnl_timeseries.with_columns(
                 pl.when(pl.col("timestamp") == pl.col("timestamp").max())
                 .then(1)
-                .otherwise(pl.col("is_unstructured_news_event"))
-                .alias("is_unstructured_news_event")
+                .otherwise(pl.col("is_news_event"))
+                .alias("is_news_event")
             )
     
     def calc_volatility(self):
