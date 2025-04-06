@@ -3,6 +3,7 @@ import polars as pl
 import numpy as np
 import math 
 import time
+import asyncio
 
 class APTBot(Compute):
     """Specialized bot for APT symbol"""
@@ -16,7 +17,8 @@ class APTBot(Compute):
         self.fair_value = None
         self.spread = None 
         self.pe_ratio = 10 # for practice rounds
-
+        self.trade_count = 0
+        self.trading_frequency = 20
         # Avellaneda–Stoikov parameters 
         self.T = 15 * 60 # 15 minute horizon 
         self.S0 = None
@@ -56,17 +58,17 @@ class APTBot(Compute):
         positions = self.parent_client.positions.get("APT", 0)
 
         # print all variables 
-        print("gamma: ", self.gamma)
-        print("k: ", self.k)
-        print("T: ", self.T)
-        print("t:", t)
-        print("S0: ", self.S0)
-        print("A: ", self.A)
-        print("sigma: ", self.sigma)
-        print("q_tilde: ", self.q_tilde)
-        print("n_steps: ", self.n_steps)
-        print("n_paths: ", self.n_paths)
-        print("positions: ", self.parent_client.positions.get("APT", 0))
+        #print("gamma: ", self.gamma)
+        #print("k: ", self.k)
+        #print("T: ", self.T)
+        #print("t:", t)
+        #print("S0: ", self.S0)
+        #print("A: ", self.A)
+        #print("sigma: ", self.sigma)
+        #print("q_tilde: ", self.q_tilde)
+        #print("n_steps: ", self.n_steps)
+        #print("n_paths: ", self.n_paths)
+        #print("positions: ", self.parent_client.positions.get("APT", 0))
 
         constant_term = (1 / self.gamma) * math.log(1 + self.gamma / self.k) 
 
@@ -78,17 +80,17 @@ class APTBot(Compute):
         self.deltaAsk = max(-self.gamma * (self.sigma ** 2) * self.T * (positions - 0.5) + constant_term, 0)
 
         delta_bid_price = int(reservation_price - self.deltaBid ) * 100 
-        print("delta ver. bid price: ", delta_bid_price )
+        #print("delta ver. bid price: ", delta_bid_price )
         delta_ask_price = int(reservation_price + self.deltaAsk) * 100
-        print("delta ver. ask price: ", delta_ask_price )
+        #print("delta ver. ask price: ", delta_ask_price )
         
         # using spread instead 
         spread = self.calc_bid_ask_spread()
-        print("spread: ", spread)
+        #print("spread: ", spread)
         bid_price = int((reservation_price - spread / 2) * 100)
-        print("spead ver. bid price: ", bid_price )
+        #print("spead ver. bid price: ", bid_price )
         ask_price = int((reservation_price + spread / 2) * 100)
-        print("spead ver. ask price: ", ask_price )
+        #print("spead ver. ask price: ", ask_price )
 
         return bid_price, ask_price
         
@@ -121,3 +123,27 @@ class APTBot(Compute):
 
         self.S0 = self.fair_value
         return self.fair_value 
+    
+    async def handle_trade(self):
+        from utcxchangelib import xchange_client
+        with self.parent_client._lock: 
+            latest_timestamp = self.parent_client.stock_LOB_timeseries["APT"].select("timestamp").max().item()
+            print("type of latest_timestamp: ", type(latest_timestamp))
+            bid_price, ask_price = self.calc_bid_ask_price(latest_timestamp)
+        print("========================================")
+        print("Adjusted Bid Price:", bid_price)
+        await self.parent_client.place_order("APT",self.q_tilde, xchange_client.Side.BUY, bid_price)
+        print("Adjusted Ask Price:", ask_price)
+        await self.parent_client.place_order("APT",self.q_tilde, xchange_client.Side.SELL, ask_price)
+        print("my positions:", self.parent_client.positions)
+        
+    
+    def increment_trade(self):
+        self.trade_count += 1
+        if self.trade_count % self.trading_frequency == 0:
+            asyncio.create_task(self.handle_trade())
+            
+            
+    def unstructured_update(self, news_data):
+        pass 
+    

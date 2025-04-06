@@ -543,7 +543,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             current_time = int(time.time()) - self.start_time
             pnl_row = pl.DataFrame([{
                 "timestamp": current_time,
-                "pnl": pnl
+                "pnl": int(pnl)
             }])
             
             with self._lock:
@@ -575,7 +575,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
     async def start(self, user_interface):
         # Start compute threads
         self.start_compute_threads()
-        asyncio.create_task(self.trade())
+        #asyncio.create_task(self.trade())
         asyncio.create_task(self.view_books())
         
         # This is where Phoenixhood will be launched if desired.

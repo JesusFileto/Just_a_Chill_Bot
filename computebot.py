@@ -24,7 +24,10 @@ class Compute:
         
     def unstructured_update(self, news_data):
         pass
-        
+    
+    async def handle_trade(self):
+        pass
+    
     async def send_to_parent(self, message_type, data):
         """
         Send data back to the parent client
