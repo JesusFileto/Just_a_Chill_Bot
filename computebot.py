@@ -3,6 +3,7 @@ import polars as pl
 import numpy as np
 import asyncio
 from scipy.optimize import minimize
+import math
 # super class for all compute bots
 class Compute: 
 
@@ -13,8 +14,16 @@ class Compute:
         self.alpha = None
         self.beta = None
         self.sigma = None
-    def calc_bid_ask_spread(): 
-        pass
+        self.gamma = None
+        self.k = None
+        self.q_tilde = None
+        self.T = None
+        self.S0 = None
+        self.deltaBid = None
+        self.deltaAsk = None
+        self.A = None
+        
+    
 
     def calc_fair_value(): 
         pass 
@@ -22,6 +31,83 @@ class Compute:
     async def bot_handle_trade_msg(self, symbol: str, price: int, qty: int):
         pass
     
+    def calc_bid_ask_spread(self, symbol=None):
+        
+        book = self.parent_client.order_books[symbol]
+
+        sorted_bids = sorted(((p, q) for p, q in book.bids.items() if q > 0), reverse=True)
+        sorted_asks = sorted((p, q) for p, q in book.asks.items() if q > 0)
+        print("Sorted Bids:", sorted_bids)
+        print("Sorted Asks:", sorted_asks)
+    
+        best_bid,_ = max(sorted_bids) if len(sorted_bids) > 0 else None 
+        print("best bid: ", best_bid)
+        best_ask,_ = min(sorted_asks) if len(sorted_asks) > 0 else None 
+        print("best ask: ", best_ask)
+
+        if best_bid is None or best_ask is None: 
+            return None 
+        
+        self.spread = (best_ask - best_bid) / 100
+        return self.spread
+
+    def calc_bid_ask_price(self, symbol=None, t=None):
+        """Override with APT-specific spread calculation"""
+
+        positions = self.parent_client.positions.get(symbol, 0)
+
+        # print all variables 
+        #print("gamma: ", self.gamma)
+        #print("k: ", self.k)
+        #print("T: ", self.T)
+        #print("t:", t)
+        #print("S0: ", self.S0)
+        #print("A: ", self.A)
+        #print("sigma: ", self.sigma)
+        #print("q_tilde: ", self.q_tilde)
+        #print("n_steps: ", self.n_steps)
+        #print("n_paths: ", self.n_paths)
+        #print("positions: ", self.parent_client.positions.get("APT", 0))
+        gamma, k, q_tilde, T, sigma = self.get_avellaneda_stoikov_params()
+        
+        S0 = self.get_fair_value()
+
+        constant_term = (1 / self.gamma) * math.log(1 + self.gamma / self.k) 
+
+        print("constant term: ", constant_term)
+
+        reservation_price, sigma = self.calc_reservation_price(t, sigma, gamma)
+
+        deltaBid = max(gamma * (sigma ** 2) * T * (positions + 0.5) + constant_term, 0)
+        deltaAsk = max(-gamma * (sigma ** 2) * T * (positions - 0.5) + constant_term, 0)
+
+        delta_bid_price = int(reservation_price - deltaBid ) * 100 
+        #print("delta ver. bid price: ", delta_bid_price )
+        delta_ask_price = int(reservation_price + deltaAsk) * 100
+        #print("delta ver. ask price: ", delta_ask_price )
+        
+        # using spread instead 
+        #spread = self.calc_bid_ask_spread()
+        #print("spread: ", spread)
+        #bid_price = int((reservation_price - spread / 2) * 100)
+        #print("spead ver. bid price: ", bid_price )
+        #ask_price = int((reservation_price + spread / 2) * 100)
+        #print("spead ver. ask price: ", ask_price )
+
+        return delta_bid_price, delta_ask_price
+    
+    def calc_reservation_price(self, symbol, t, sigma, gamma):
+        """We use the avellinda stoikov model to calculate the reservation price for 
+        interday trading p_{\ text{mm}} = s - q \cdot \gamma \sigma^2 (T - t)"""
+        S0 = self.get_fair_value()
+        sigma = S0 * 0.02 / math.sqrt(self.T)
+        dt = self.T - t # t is the current time stamp 
+
+        positions = self.parent_client.positions.get(symbol, 0)
+
+        reservation_price = S0 - positions * gamma * sigma**2 * dt
+        print("reservation price: ", reservation_price) 
+        return reservation_price, sigma
         
     def increment_trade(self):
         pass

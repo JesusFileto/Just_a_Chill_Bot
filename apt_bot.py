@@ -29,7 +29,7 @@ class APTBot(Compute):
         self.sigma = None
         self.k = math.log(2) / 0.01
         self.q_tilde = 10 
-        self.gamma = 0.01 / self.q_tilde
+        self.gamma = 0.1 / self.q_tilde
         self.n_steps = int(self.T)
         self.n_paths = 500 
         
@@ -43,9 +43,9 @@ class APTBot(Compute):
         print("Sorted Bids:", sorted_bids)
         print("Sorted Asks:", sorted_asks)
     
-        best_bid,_ = max(sorted_bids) if sorted_bids else None 
+        best_bid,_ = max(sorted_bids) if len(sorted_bids) > 0 else None 
         print("best bid: ", best_bid)
-        best_ask,_ = min(sorted_asks) if sorted_asks else None 
+        best_ask,_ = min(sorted_asks) if len(sorted_asks) > 0 else None 
         print("best ask: ", best_ask)
 
         if best_bid is None or best_ask is None: 
@@ -113,11 +113,14 @@ class APTBot(Compute):
         if self.earnings is None: 
             return 
         self.fair_value = self.earnings / self.pe_ratio
+        current_time = int(time.time()) - self.parent_client.start_time
+        self._update_fair_value_timeseries(current_time, self.fair_value)
 
     def handle_earnings_update(self, earnings):  
         self.earnings = earnings 
         self.calc_fair_value()
         print("handling earnings: ", self.fair_value)
+        
         self.parent_client.pnl_timeseries = self.parent_client.pnl_timeseries.with_columns(
             pl.when(pl.col("timestamp") == pl.col("timestamp").max())
                 .then(2)
@@ -130,7 +133,19 @@ class APTBot(Compute):
             self.fair_value = 10 
 
         self.S0 = self.fair_value
+        current_time = int(time.time()) - self.parent_client.start_time
         return self.fair_value 
+    
+    def _update_fair_value_timeseries(self, timestamp, fair_value):
+        """
+        Update the fair value timeseries with a new snapshot
+        """
+        new_row = pl.DataFrame([{
+            "timestamp": timestamp,
+            "fair_value": int(fair_value*100)
+        }])
+        self.parent_client.fair_value_timeseries["APT"] = pl.concat([self.parent_client.fair_value_timeseries["APT"], new_row])
+        print("self.parent_client.fair_value_timeseries['APT']: ", self.parent_client.fair_value_timeseries["APT"])
     
     async def handle_trade(self):
         with self.parent_client._lock: 
@@ -149,8 +164,9 @@ class APTBot(Compute):
     
     def increment_trade(self):
         self.trade_count += 1
-        if self.trade_count % self.trading_frequency == 0:
-            asyncio.create_task(self.handle_trade())
+        #dont trade apt while testing
+        # if self.trade_count % self.trading_frequency == 0:
+        #     asyncio.create_task(self.handle_trade())
             
             
     def unstructured_update(self, news_data):

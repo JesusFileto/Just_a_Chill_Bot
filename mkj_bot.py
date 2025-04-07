@@ -123,20 +123,19 @@ class MKJBot(Compute):
         fair_value = max(0, min(5000, fair_value))
         
         print("fair_value MKJ: ", fair_value)
-        self._update_fair_value_timeseries(fair_value, current_midpoint)
+        self._update_fair_value_timeseries(fair_value)
         return fair_value
     
-    def _update_fair_value_timeseries(self, fair_value, midpoint):
+    def _update_fair_value_timeseries(self, fair_value):
         """
         Update the fair value timeseries with a new snapshot
         """
         timestamp = self.parent_client.stock_LOB_timeseries[self.symbol]["timestamp"].tail(1).item()
         new_row = pl.DataFrame([{
             "timestamp": timestamp,
-            "fair_value": fair_value,
-            "midpoint": midpoint
+            "fair_value": int(fair_value),
         }])
-        self.fair_value_timeseries = pl.concat([self.fair_value_timeseries, new_row])
+        self.parent_client.fair_value_timeseries["MKJ"] = pl.concat([self.parent_client.fair_value_timeseries["MKJ"], new_row])
     
     def _calculate_order_book_imbalance(self):
         """

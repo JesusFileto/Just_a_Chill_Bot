@@ -31,6 +31,7 @@ class ComputeThread(threading.Thread):
         self.loop = None
         
     
+    
                 
     def run(self):
         """Run the asyncio event loop in this thread"""
@@ -113,6 +114,21 @@ class MyXchangeClient(xchange_client.XChangeClient):
         "is_news_event": pl.Int64
     })
     
+    fair_value_timeseries = {
+        "APT": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "fair_value": pl.Int64
+        }),
+        "DLR": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "fair_value": pl.Int64
+        }),
+        "MKJ": pl.DataFrame(schema={
+            "timestamp": pl.Int64,
+            "fair_value": pl.Int64
+        })
+    }
+        
     stock_LOB_timeseries = { 
         "APT": pl.DataFrame(schema={
             "timestamp": pl.Int64,
@@ -622,6 +638,34 @@ class MyXchangeClient(xchange_client.XChangeClient):
         finally:
             # Ensure compute threads are stopped when the main coroutine exits
             self.stop_compute_threads()
+    
+    async def plot_fair_value(self):
+        plt.figure(figsize=(12, 6))
+        
+        # Thread-safe read of timeseries data
+        for symbol, df in self.fair_value_timeseries.items():
+            with self._lock:
+                timestamp = df["timestamp"].to_list()
+                fair_value = df["fair_value"].to_list()
+                midpoint_df = self.stock_LOB_timeseries[symbol]
+                midpoint = midpoint_df["mid_price"].to_list()
+                timestamp_midpoint = midpoint_df["timestamp"].to_list()
+                print("symbol: ", symbol)
+                print("midpoint: ", midpoint)
+                print("fair_value: ", fair_value)
+                print("timestamp: ", timestamp)
+                
+                plt.plot(timestamp, fair_value, label="Fair Value", linestyle="-", markersize=1)
+                plt.plot(timestamp_midpoint, midpoint, label="Midpoint", linestyle="-", markersize=1)
+                
+                plt.legend()
+                plt.grid(True)
+                plt.xticks(rotation=45)
+                plt.title("Fair Value and Midpoint")
+                plt.tight_layout()
+                plt.savefig(f"data/fair_value_{symbol}.png")
+                plt.close()
+                
         
 
 
@@ -639,6 +683,7 @@ async def main(user_interface: bool):
         # Plot data at the end of trading
         await my_client.plot_best_bid_ask()
         await my_client.plot_pnl()
+        await my_client.plot_fair_value()
     
     return
 
