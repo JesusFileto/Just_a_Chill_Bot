@@ -3,8 +3,8 @@ import polars as pl
 import numpy as np
 import asyncio
 import time
-
-
+import math
+from utcxchangelib import xchange_client
 class MKJBot(Compute):
     """Specialized bot for MKJ symbol"""
     
@@ -12,7 +12,7 @@ class MKJBot(Compute):
         super().__init__(parent_client)
         self.symbol = "MKJ"
         self.trade_count = 0
-        self.fair_value = None
+        self.fair_value = 1000
         self.fair_value_timeseries = pl.DataFrame(schema={
             "timestamp": pl.Int64,
             "fair_value": pl.Float64,
@@ -43,6 +43,25 @@ class MKJBot(Compute):
         self.k_factor = 1.5  # Confidence interval factor
         self.min_spread = 0.1  # Minimum spread to consider
         self.max_spread = 5.0  # Maximum spread to consider
+        
+        self.spread = None 
+        self.trade_count = 0
+        self.trading_frequency = 30
+        # Avellaneda–Stoikov parameters 
+        self.T = 15 * 60 # 15 minute horizon 
+        self.S0 = 1000
+        self.deltaBid = None 
+        self.deltaAsk = None 
+        self.sigma = None
+        self.A = 0.05 
+        self.k = math.log(2) / 0.01
+        self.q_tilde = 10 
+        self.gamma = 0.01 / self.q_tilde
+        self.n_steps = int(self.T)
+        self.n_paths = 500 
+        
+        # GARCH parameters random initialization
+        self.omega_garch, self.alpha_garch, self.beta_garch = [0.1, 0.05, 0.94]
         
     def calc_bid_ask_spread(self):
         """
@@ -81,15 +100,15 @@ class MKJBot(Compute):
         
         # If we don't have enough data, return a default value
         if len(historical_midpoints) == 0:
-            return 50.0
+            return 1000.0
         if len(historical_midpoints) < 5:
             #mark return value as last value in historical_midpoints
             return historical_midpoints[-1]
         
         
         # Get the current midpoint
-        current_midpoint = historical_midpoints[-1] if historical_midpoints.is_empty() is False else 50.0
-        print("current_midpoint: ", current_midpoint)
+        current_midpoint = historical_midpoints[-1] if historical_midpoints.is_empty() is False else 1000.0
+        #print("current_midpoint: ", current_midpoint)
         
         
         # Convert historical spreads to numpy array if not empty
@@ -106,13 +125,30 @@ class MKJBot(Compute):
         # Fair value = midpoint + alpha*spread_change + beta*imbalance
         spread_change = spread_ratio - 1.0  # Normalized spread change
         
-        # Apply regression coefficients if available
+        
+        
         if len(historical_midpoints) >= self.regression_window:
             self._update_regression_parameters(historical_midpoints, historical_spreads)
-            fair_value = current_midpoint + self.alpha * spread_change + self.beta * imbalance
+            # Get previous snapshot values
+            prev_spread = historical_spreads[-2]
+            spread_change = current_spread - prev_spread
+            
+            # Get previous imbalance value
+            prev_imbalance = self.imbalance_timeseries.select("imbalance").tail(2).to_series().to_numpy()[0]
+            imbalance_change = imbalance - prev_imbalance
+            
+            # Use current alpha/beta but only look at most recent changes
+            fair_value = current_midpoint + self.alpha * spread_change + self.beta * imbalance_change
+            #print("fair_value", fair_value)
+            #print("current_midpoint", current_midpoint)
+            #print("self.alpha", self.alpha)
+            #print("self.beta", self.beta) 
+            #print("spread_change", spread_change)
+            #print("imbalance", imbalance)
         else:
             # Simple heuristic if we don't have enough data for regression
             fair_value = current_midpoint + 0.1 * spread_change + 0.2 * imbalance
+        
         
         # Apply confidence bands based on volatility
         # Fair value is within [fair_value - k*volatility, fair_value + k*volatility]
@@ -120,12 +156,24 @@ class MKJBot(Compute):
         # upper_band = fair_value + self.k_factor * self.volatility
         
         # Ensure fair value is within reasonable bounds
-        fair_value = max(0, min(5000, fair_value))
+        fair_value = max(0, min(10000, fair_value))
+        self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma = self.calc_volatility()
+        #print("sigma: ", self.sigma)
+        #print("omega: ", self.omega_garch)
+        #print("alpha: ", self.alpha_garch)
+        #print("beta: ", self.beta_garch)
         
-        print("fair_value MKJ: ", fair_value)
+        #print("fair_value MKJ: ", fair_value)
         self._update_fair_value_timeseries(fair_value)
         return fair_value
     
+    def calc_volatility(self):
+        params = super().calc_volatility(self.omega_garch, self.alpha_garch, self.beta_garch, index= self.regression_window)
+        if params is not None and not any(np.isnan(p) for p in params):
+            self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma = params
+            return params
+        return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
+
     def _update_fair_value_timeseries(self, fair_value):
         """
         Update the fair value timeseries with a new snapshot
@@ -249,12 +297,16 @@ class MKJBot(Compute):
                 beta_hat = np.linalg.lstsq(X, y, rcond=None)[0]
                 self.alpha = beta_hat[0]  # Coefficient for spread changes
                 self.beta = beta_hat[1]   # Coefficient for imbalances
-                print("alpha: ", self.alpha)
-                print("beta: ", self.beta)
+                #print("alpha: ", self.alpha)
+                #print("beta: ", self.beta)
             except:
                 # If regression fails, use default values
                 self.alpha = 0.1
                 self.beta = 0.2
+
+    
+    def get_fair_value(self):
+        return self.fair_value
     
     async def process_update(self, update):
         """
@@ -266,6 +318,22 @@ class MKJBot(Compute):
         # This method would be called by the parent client's compute thread
         # It would process updates and calculate new fair values
         pass
+    # async def handle_trade(self):
+    #     latest_timestamp = int(time.time()) - self.parent_client.start_time
+    #     if latest_timestamp is None:
+    #         return 
+    #     #print("type of latest_timestamp: ", type(latest_timestamp))
+    #     bid_price, ask_price = self.calc_bid_ask_price(latest_timestamp)
+    #     #print("========================================")
+    #     #print("handle_trade for ", self.symbol)
+    #     #print("fair_value: ", self.fair_value)
+    #     #print("Adjusted Bid Price:", bid_price)
+    #     #print("Adjusted Ask Price:", ask_price)
+    #     #print("========================================")
+    #     await self.parent_client.place_order(self.symbol, self.q_tilde, xchange_client.Side.BUY, bid_price)
+    #     await self.parent_client.place_order(self.symbol, self.q_tilde, xchange_client.Side.SELL, ask_price)
+    #     #print("my positions:", self.parent_client.positions)
+    
     
     
     def increment_trade(self):
@@ -275,11 +343,20 @@ class MKJBot(Compute):
         # For MKJ, we want to only update our model based on a new LOB snapshot
         # do we want to perform a trade after a fixed number of trades or time interval?
         self.trade_count += 1
+        if self.trade_count % self.trading_frequency == 0:
+            self.handle_trade("MKJ")
         
     def handle_snapshot(self):
-        print("handle_snapshot")
+        #print("handle_snapshot")
+        #only want to update the fair value when we have a new LOB snapshot
         self.fair_value = self.calc_fair_value()
         
+    def calc_bid_ask_price(self, symbol=None, t=None):
+        return super().calc_bid_ask_price(self.symbol, t)
+    
+    def get_avellaneda_stoikov_params(self):
+        return self.gamma, self.k, self.fair_value, self.T, self.sigma
+    
     
     def unstructured_update(self, news_data):
         """
@@ -290,3 +367,6 @@ class MKJBot(Compute):
         """
         # For MKJ, we might want to update our model based on news
         pass
+    
+    def get_q_tilde(self):
+        return self.q_tilde

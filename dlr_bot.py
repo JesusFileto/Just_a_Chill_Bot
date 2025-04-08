@@ -29,21 +29,21 @@ class DLRBot(Compute):
         
         # Current signature count
         self.current_signatures = self.S0_sig
-        self.fair_value = 50
+        self.fair_value = 5000
         
         self.spread = None 
         self.trade_count = 0
-        self.trading_frequency = 20
+        self.trading_frequency = 30
         # Avellaneda–Stoikov parameters 
         self.T = 15 * 60 # 15 minute horizon 
-        self.S0 = 50
+        self.S0 = 5000
         self.deltaBid = None 
         self.deltaAsk = None 
         self.sigma = None
         self.A = 0.05 
         self.k = math.log(2) / 0.01
         self.q_tilde = 10 
-        self.gamma = 0.1 / self.q_tilde
+        self.gamma = 0.01 / self.q_tilde
         self.n_steps = int(self.T)
         self.n_paths = 500 
         
@@ -66,10 +66,10 @@ class DLRBot(Compute):
         payoffs = np.where(signatures >= 100000, 100, 0)
         fair_value = np.mean(payoffs)
         
-        return fair_value
+        return fair_value * 100
     
     def get_avellaneda_stoikov_params(self):
-        return self.gamma, self.k, self.q_tilde, self.T, self.sigma
+        return self.gamma, self.k, self.fair_value, self.T, self.sigma
         
     def calc_fair_value(self):
         """
@@ -84,11 +84,11 @@ class DLRBot(Compute):
         
         #print("current time: ", current_time)
     
-        fair_value = self.monte_carlo_vectorized(self.current_signatures, self.T_sig - self.update_counter, 100000)
-        print("monte_carlo_value: ", fair_value)
-        print("update_counter: ", self.update_counter)
-        print("T: ", self.T_sig)
-        print("current_signatures: ", self.current_signatures)
+        fair_value = self.monte_carlo_vectorized(self.current_signatures, self.T_sig - self.update_counter, 1000000)
+        #print("monte_carlo_value: ", fair_value)
+        #print("update_counter: ", self.update_counter)
+        #print("T: ", self.T_sig)
+        #print("current_signatures: ", self.current_signatures)
         
         
         current_time = int(time.time()) - self.parent_client.start_time
@@ -102,18 +102,14 @@ class DLRBot(Compute):
         """
         new_row = pl.DataFrame([{
             "timestamp": timestamp,
-            "fair_value": int(fair_value*100)
+            "fair_value": int(fair_value)
         }])
         self.parent_client.fair_value_timeseries["DLR"] = pl.concat([self.parent_client.fair_value_timeseries["DLR"], new_row])
     
-    def calc_bid_ask_spread(self):
-        return super().calc_bid_ask_spread(self.symbol)
         
-    def calc_bid_ask_price(self, t=None):
+    def calc_bid_ask_price(self, symbol=None, t=None):
         return super().calc_bid_ask_price(self.symbol, t)
     
-    def calc_reservation_price(self, t, sigma, gamma):
-        return super().calc_reservation_price(self.symbol, t, sigma, gamma)
     
     async def process_update(self, update):
         """
@@ -136,26 +132,10 @@ class DLRBot(Compute):
             qty: The trade quantity
         """
     
-    
-    async def handle_trade(self):
-        with self.parent_client._lock: 
-            latest_timestamp = int(time.time()) - self.parent_client.start_time
-            if latest_timestamp is None:
-                return 
-            print("type of latest_timestamp: ", type(latest_timestamp))
-            bid_price, ask_price = self.calc_bid_ask_price(latest_timestamp)
-        print("========================================")
-        print("Adjusted Bid Price:", bid_price)
-        await self.parent_client.place_order(self.symbol, self.q_tilde, xchange_client.Side.BUY, bid_price)
-        print("Adjusted Ask Price:", ask_price)
-        await self.parent_client.place_order(self.symbol, self.q_tilde, xchange_client.Side.SELL, ask_price)
-        print("my positions:", self.parent_client.positions)
-        
-    
     def increment_trade(self):
         self.trade_count += 1
         if self.trade_count % self.trading_frequency == 0:
-            asyncio.create_task(self.handle_trade())
+            self.handle_trade("DLR")
             
     def get_fair_value(self):
         return self.fair_value
@@ -181,7 +161,7 @@ class DLRBot(Compute):
         
         # Calculate new fair value
         self.fair_value = self.calc_fair_value()
-        print("DLR fair value: ", self.fair_value)
+        #print("DLR fair value: ", self.fair_value)
         
     
     def unstructured_update(self, news_data):
@@ -193,3 +173,6 @@ class DLRBot(Compute):
         """
         # For DLR, we might want to update our model based on news
         pass
+    
+    def get_q_tilde(self):
+        return self.q_tilde

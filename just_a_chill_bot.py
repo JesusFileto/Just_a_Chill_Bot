@@ -18,7 +18,10 @@ import time
 import queue
 import signal
 import sys
+import os
 
+# Global shutdown event
+SHUTDOWN_EVENT = threading.Event()
 
 class ComputeThread(threading.Thread):
     """A thread class that runs an asyncio event loop for compute bots"""
@@ -29,10 +32,10 @@ class ComputeThread(threading.Thread):
         self.message_queue = queue
         self.stop_event = threading.Event()
         self.loop = None
+        self._is_shutting_down = False
+        self._force_exit = False
+        self._exit_requested = False
         
-    
-    
-                
     def run(self):
         """Run the asyncio event loop in this thread"""
         # Create a new event loop for this thread
@@ -46,26 +49,54 @@ class ComputeThread(threading.Thread):
             print(f"{self.name}: Error in thread: {e}")
         finally:
             # Clean up
-            self.loop.close()
+            try:
+                self._is_shutting_down = True
+                self._force_exit = True
+                self._exit_requested = True
+                
+                # Cancel all running tasks
+                pending = asyncio.all_tasks(self.loop)
+                for task in pending:
+                    task.cancel()
+                
+                # Run until all tasks are cancelled
+                if pending:
+                    self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                
+                # Close the loop
+                self.loop.close()
+            except Exception as e:
+                print(f"{self.name}: Error during cleanup: {e}")
             print(f"{self.name}: Thread and event loop stopped")
-            
+            return
+        
     def stop(self):
         """Signal the thread to stop"""
         self.stop_event.set()
+        self._is_shutting_down = True
+        self._force_exit = True
+        self._exit_requested = True
+        
         # If we're waiting on the queue, this will unblock it
-        self.message_queue.put(None)
+        try:
+            self.message_queue.put(None)
+        except:
+            pass
         
     async def _process_updates(self):
         """Process updates from the message queue"""
         print(f"{self.name}: Started processing")
         
-        while not self.stop_event.is_set():
+        while not (self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set()):
             try:
                 # Wait for an update with asyncio to allow cancellation
                 index = await self._get_update_async()
                 
                 # None is a signal to check the stop_event
                 if index is None:
+                    # If stop_event is set, exit the loop
+                    if self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
+                        break
                     continue
              
                 # Delegate to the bot's process_update method
@@ -76,10 +107,22 @@ class ComputeThread(threading.Thread):
                 if hasattr(self.message_queue, 'task_done'):
                     self.message_queue.task_done()
                 
+            except asyncio.CancelledError:
+                print(f"{self.name}: Processing cancelled")
+                break
             except Exception as e:
                 print(f"{self.name}: Error processing update: {e}")
+                import traceback
+                traceback.print_exc()
+                # If stop_event is set, exit the loop
+                if self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
+                    break
+                # Otherwise, continue processing
+                await asyncio.sleep(0.05)  # Brief pause before retrying
                 
         print(f"{self.name}: Stopped processing updates")
+        # Ensure the coroutine exits completely
+        return
         
     async def _get_update_async(self):
         """Get an update from the queue using asyncio"""
@@ -90,14 +133,31 @@ class ComputeThread(threading.Thread):
         def get_from_queue():
             try:
                 # Use a timeout to allow checking the stop event
-                return self.message_queue.get(timeout=0.5)
+                return self.message_queue.get(timeout=0.05)  # Reduced timeout to 0.05 seconds
             except queue.Empty:
                 return None
                 
-        while not self.stop_event.is_set():
+        # Check if we should exit immediately
+        if self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
+            return None
+            
+        try:
+            # Check if the event loop is shutting down
+            if loop.is_closed() or loop.is_running() == False or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
+                print(f"{self.name}: Event loop is shutting down, exiting queue get loop")
+                return None  # Return immediately instead of continuing the loop
+                
             update = await loop.run_in_executor(None, get_from_queue)
-            if update is not None or self.stop_event.is_set():
+            if update is not None or self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
                 return update
+        except asyncio.CancelledError:
+            print(f"{self.name}: Queue get cancelled")
+            return None
+        except Exception as e:
+            print(f"{self.name}: Error getting from queue: {e}")
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(0.05)  # Brief pause before retrying
                 
         return None
         
@@ -108,10 +168,16 @@ class MyXchangeClient(xchange_client.XChangeClient):
     # Thread lock for synchronizing access to shared data
     _lock = threading.Lock()
     
+    # Initialize pnl_timeseries with columns for each symbol
     pnl_timeseries = pl.DataFrame(schema={
         "timestamp": pl.Int64,
         "pnl": pl.Int64,
-        "is_news_event": pl.Int64
+        "is_news_event": pl.Int64,
+        "APT_pnl": pl.Int64,
+        "DLR_pnl": pl.Int64,
+        "MKJ_pnl": pl.Int64,
+        "AKAV_pnl": pl.Int64,
+        "AKIM_pnl": pl.Int64,
     })
     
     fair_value_timeseries = {
@@ -128,7 +194,9 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "fair_value": pl.Int64
         })
     }
-        
+    
+    trade_queue = queue.Queue()
+    
     stock_LOB_timeseries = { 
         "APT": pl.DataFrame(schema={
             "timestamp": pl.Int64,
@@ -250,8 +318,9 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "APT": APTBot(self),
             "DLR": DLRBot(self),
             "MKJ": MKJBot(self),
-            "AKIM_AKAV": AKIMAKAVBot(self)
         }
+        #add the three underlying bots to the AKIM/AKAV bot
+        self.compute_bots["AKIM_AKAV"] = AKIMAKAVBot(self, self.compute_bots["APT"], self.compute_bots["MKJ"], self.compute_bots["DLR"])
         
         # Create message queues for each symbol
         self.compute_queues = {
@@ -303,18 +372,50 @@ class MyXchangeClient(xchange_client.XChangeClient):
         """Signal all compute threads to stop and wait for them to finish"""
         print("Stopping all compute threads...")
         
+        # Set the global shutdown event
+        SHUTDOWN_EVENT.set()
+        
         # Signal all threads to stop
         for thread_name, thread in self._compute_threads.items():
             thread.stop()
+            thread._is_shutting_down = True
             
-        # Wait for all threads to finish
+        # Wait for all threads to finish with a timeout
+        timeout = 2  # 2 seconds total timeout
+        start_time = time.time()
+        
         for thread_name, thread in self._compute_threads.items():
             if thread.is_alive():
                 print(f"Waiting for {thread.name} to finish...")
-                thread.join(timeout=3)
+                
+                # Calculate remaining timeout
+                elapsed = time.time() - start_time
+                remaining_timeout = max(0.1, timeout - elapsed)
+                
+                thread.join(timeout=remaining_timeout)
                 
                 if thread.is_alive():
-                    print(f"WARNING: {thread.name} did not stop cleanly")
+                    print(f"WARNING: {thread.name} did not stop cleanly, forcing termination")
+                    # Force thread to stop if it's still alive
+                    if hasattr(thread, 'loop') and thread.loop is not None:
+                        try:
+                            # Try to close the loop if it's still open
+                            if not thread.loop.is_closed():
+                                thread.loop.call_soon_threadsafe(thread.loop.stop)
+                        except Exception as e:
+                            print(f"Error stopping {thread.name} loop: {e}")
+                    
+                    # Set the shutdown flag directly
+                    thread._is_shutting_down = True
+                    
+                    # Try joining again with a shorter timeout
+                    thread.join(timeout=0.2)
+                    
+                    # If still alive, this is a last resort
+                    if thread.is_alive():
+                        print(f"CRITICAL: {thread.name} still alive after forced termination")
+                        # We can't do much more here, the thread will eventually exit
+                        # when the program terminates
                 else:
                     print(f"Successfully stopped {thread.name}")
                     
@@ -486,10 +587,16 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     async def view_books(self):
         # Use polars DataFrame for better performance
-        print("viewing books")
+        #print("viewing books")
         while True:
             await asyncio.sleep(1)
+            current_time = int(time.time()) - self.start_time
+            
+            # Initialize base PNL with cash position
             pnl = self.positions['cash']
+            
+            # Create a list to store all symbol data for batch processing
+            symbol_data = {}
             
             for symbol, book in self.order_books.items():
                 # Extract prices where quantity > 0 for printing
@@ -501,7 +608,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 unrealized_pnl = self.calculate_unrealized_pnl(symbol_position, sorted_bids, sorted_asks)
                 pnl += unrealized_pnl
                 
-                
+                # Store symbol data for batch processing
+                symbol_data[symbol] = unrealized_pnl
                 
                 # Create a new row with the first 3 levels of bids and asks
                 if symbol in self.stock_LOB_timeseries:
@@ -574,70 +682,157 @@ class MyXchangeClient(xchange_client.XChangeClient):
                             new_row
                         ])
                     if symbol == "MKJ":
-                        print("incrementing trade for MKJ")
+                        #print("incrementing trade for MKJ")
                         self.compute_bots["MKJ"].handle_snapshot()
             
             # Update PnL timeseries with total unrealized PnL
             current_time = int(time.time()) - self.start_time
-            pnl_row = pl.DataFrame([{
+            
+            # Create a dictionary with all PNL data
+            pnl_data = {
                 "timestamp": current_time,
                 "pnl": int(pnl),
                 "is_news_event": 0
-            }])
+            }
+            
+            # Add individual symbol PNLs
+            for symbol, symbol_pnl in symbol_data.items():
+                pnl_data[f"{symbol}_pnl"] = int(symbol_pnl)
+                
+            print("pnl_data: ", pnl_data)
+            
             
             with self._lock:
+                # Concatenate the new row
                 self.pnl_timeseries = pl.concat([
                     self.pnl_timeseries,
-                    pnl_row
+                    pl.DataFrame([pnl_data])
                 ])
 
     async def plot_pnl(self):
-        plt.figure(figsize=(12, 6))
+        """Plot individual PNL for each asset being traded"""
+        # Get all symbols being traded (excluding 'cash')
+        symbols = [symbol for symbol in self.positions.keys() if symbol != 'cash']
         
         # Thread-safe read of timeseries data
         with self._lock:
-            timestamp = self.pnl_timeseries["timestamp"].to_list()
-            pnl = self.pnl_timeseries["pnl"].to_list()
+            # Get timestamps for x-axis
+            timestamps = self.pnl_timeseries["timestamp"].to_list()
             
-        plt.plot(timestamp, pnl, label="PnL", linestyle="-", markersize=1)
+            # Get news event timestamps
+            unstructured_news_events = self.pnl_timeseries.filter(pl.col("is_news_event") == 1)
+            structured_news_events = self.pnl_timeseries.filter(pl.col("is_news_event") == 2)
+            
+            # Plot PNL for each symbol in separate figures
+            for symbol in symbols:
+                # Create a new figure for each symbol
+                plt.figure(figsize=(12, 6))
+                
+                # Get PNL data for this symbol
+                symbol_pnl = self.pnl_timeseries[f"{symbol}_pnl"].to_list()
+                
+                # Plot PNL for this symbol
+                plt.plot(timestamps, symbol_pnl, label=f"{symbol} PNL", linestyle="-", markersize=1)
+                
+                # Add vertical lines for news events
+                for ts in unstructured_news_events["timestamp"].to_list():
+                    plt.axvline(x=ts, color='r', linestyle='--', alpha=0.5)
+                
+                for ts in structured_news_events["timestamp"].to_list(): 
+                    plt.axvline(x=ts, color='g', linestyle='--', alpha=0.5)
+                
+                plt.title(f"{symbol} PNL")
+                plt.legend()
+                plt.grid(True)
+                plt.tick_params(axis='x', rotation=45)
+                
+                # Adjust layout and save
+                plt.tight_layout()
+                print(f"Saving {symbol} PnL figure")
+                plt.savefig(f"data/{symbol}_pnl.png")
+                plt.close()
+            
+            # Create a separate figure for total PNL
+            plt.figure(figsize=(12, 6))
+            total_pnl = self.pnl_timeseries["pnl"].to_list()
+            plt.plot(timestamps, total_pnl, label="Total PNL", linestyle="-", markersize=1)
+            
+            # Add vertical lines for news events
+            for ts in unstructured_news_events["timestamp"].to_list():
+                plt.axvline(x=ts, color='r', linestyle='--', alpha=0.5)
+            
+            for ts in structured_news_events["timestamp"].to_list(): 
+                plt.axvline(x=ts, color='g', linestyle='--', alpha=0.5)
+        
+            plt.title("Total PNL (All Assets)")
+            plt.legend()
+            plt.grid(True)
+            plt.tick_params(axis='x', rotation=45)
+            
+            # Adjust layout and save
+            plt.tight_layout()
+            print("Saving Total PnL figure")
+            plt.savefig("data/total_pnl.png")
+            plt.close()
 
-        unstructured_news_events = self.pnl_timeseries.filter(pl.col("is_news_event") == 1)
-        structured_news_events = self.pnl_timeseries.filter(pl.col("is_news_event") == 2)
+    async def handle_trade(self):
+        """Process trades from a queue of pending trades.
         
-        # Add vertical lines for important timestamp
-        for ts in unstructured_news_events["timestamp"].to_list():
-            plt.axvline(x=ts, color='r', linestyle='--', alpha=0.5)
+        This method processes trades from the trade queue without using a timeout.
+        """
+        # Initialize trade queue if it doesn't exist
+        if not hasattr(self, 'trade_queue'):
+            self.trade_queue = queue.Queue()
+            
+        while True:
+            try:
+                # Get next trade from queue with timeout
+                trade = await asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    self.trade_queue.get
+                )
+                
+                if trade is None:
+                    # None signals queue shutdown
+                    break
+                    
+                print(f"Processing trade: {trade}")
+                symbol = trade.get("symbol")
+                side = trade.get("side") 
+                qty = trade.get("qty")
+                price = trade.get("price")
+                
+                if not all([symbol, side, qty, price]):
+                    print(f"Invalid trade data: {trade}")
+                    self.trade_queue.task_done()
+                    continue
+                
+                # Place the order
+                print(f"Placing order: {symbol} {side} {qty} @ {price}")
+                order_id = await self.place_order(symbol, qty, side, price)
+                print(f"Order placed with ID: {order_id}")
+                
+                # Mark task as done
+                self.trade_queue.task_done()
+                
+            except Exception as e:
+                print(f"Error processing trade: {e}")
+                import traceback
+                traceback.print_exc()
         
-        for ts in structured_news_events["timestamp"].to_list(): 
-            plt.axvline(x=ts, color='g',linestyle='--', alpha=0.5)
-        
-        plt.legend()
-        plt.grid(True)
-        plt.xticks(rotation=45)
-        plt.title("Total PnL (Realized + Unrealized)")
-        
-        # Show plot
-        print("Saving PnL figure")
-        plt.tight_layout()
-        plt.savefig("data/pnl.png")
-        plt.close()
-
     async def start(self, user_interface):
         # Start compute threads
-        self.start_compute_threads()
+        #self.start_compute_threads()
         #asyncio.create_task(self.trade())
         asyncio.create_task(self.view_books())
+        asyncio.create_task(self.handle_trade())
         
         # This is where Phoenixhood will be launched if desired.
         if user_interface:
             self.launch_user_interface()
             asyncio.create_task(self.handle_queued_messages())
 
-        try:
-            await self.connect()
-        finally:
-            # Ensure compute threads are stopped when the main coroutine exits
-            self.stop_compute_threads()
+        await self.connect()
     
     async def plot_fair_value(self):
         plt.figure(figsize=(12, 6))
@@ -684,6 +879,20 @@ async def main(user_interface: bool):
         await my_client.plot_best_bid_ask()
         await my_client.plot_pnl()
         await my_client.plot_fair_value()
+        
+        # Ensure all threads are stopped
+        my_client.stop_compute_threads()
+        
+        # Set the global shutdown event as a last resort
+        SHUTDOWN_EVENT.set()
+        
+        # Force exit after a timeout if threads are still running
+        print("Waiting for threads to terminate...")
+        for thread_name, thread in my_client._compute_threads.items():
+            if thread.is_alive():
+                print(f"Thread {thread.name} is still alive, forcing exit...")
+                # We can't do much more here, the thread will eventually exit
+                # when the program terminates
     
     return
 
@@ -705,7 +914,22 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:
         result = loop.run_until_complete(main(user_interface))
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received, shutting down...")
+        # Set the global shutdown event
+        SHUTDOWN_EVENT.set()
     finally:
-        loop.close()
+        # Ensure the loop is closed
+        try:
+            loop.stop()
+            loop.close()
+        except:
+            pass
+        
+        # Force exit after a timeout
+        print("Forcing exit in 3 seconds...")
+        time.sleep(3)
+        print("Exiting...")
+        os._exit(0)  # Force exit the program
 
 # %%
