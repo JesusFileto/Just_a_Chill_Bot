@@ -28,6 +28,8 @@ class AKIMAKAVBot(Compute):
         self.MKJ_bot = MKJ_bot
         self.DLR_bot = DLR_bot
         
+        self.rolling_count = 0
+        self.regression_window = 5
         # Strategy parameters
         self.price_threshold = 0.02  # Threshold for arbitrage (2% deviation)
         self.momentum_window = 5     # Window for momentum calculation
@@ -37,8 +39,19 @@ class AKIMAKAVBot(Compute):
         self.momentum_trade_size = 5  # Size for momentum trades
         self.market_making_size = 3  # Size for market making quotes
         
+        self.imbalance_timeseries = pl.DataFrame(schema={
+            "timestamp": pl.Float64,
+            "imbalance": pl.Float64,
+            "bid_volume": pl.Int64,
+            "ask_volume": pl.Int64
+        })
+        self.symbol = "AKAV"
+        
         # ETF swap fee
         self.swap_fee = 5
+        self.trade_count = 0
+        self.trading_frequency = 1000
+        self.regression_fair_value = None
         
         # Track historical prices for momentum calculation
         self.price_history = {
@@ -100,20 +113,28 @@ class AKIMAKAVBot(Compute):
         self.is_final_minutes = False
         self.final_minutes_threshold = 15  # seconds
         
+        # volatility parameters
+        self.omega_garch, self.alpha_garch, self.beta_garch = [0.1, 0.05, 0.94]
+        self.sigma = None
+        
+        self.alpha = 0.1
+        self.beta = 0.2
+        
     def get_fair_value(self):
         """Calculate the theoretical fair value for AKAV based on underlying stocks"""
         # Sum of underlying stock fair values
-        apt_fair = self.APT_bot.get_fair_value() if self.APT_bot else 0
-        mkj_fair = self.MKJ_bot.get_fair_value() if self.MKJ_bot else 0
-        dlr_fair = self.DLR_bot.get_fair_value() if self.DLR_bot else 0
-        
+        apt_fair = self.APT_bot.fair_value_regression if self.APT_bot else 0
+        mkj_fair = self.MKJ_bot.fair_value_regression if self.MKJ_bot else 0
+        dlr_fair = self.DLR_bot.fair_value_regression if self.DLR_bot else 0
+        if apt_fair is None or mkj_fair is None or dlr_fair is None:
+            return None
         return apt_fair + mkj_fair + dlr_fair
     
     def calculate_theoretical_price(self, symbol):
         """Calculate the theoretical price for a symbol"""
         if symbol == "AKAV":
             # For AKAV, use the sum of underlying stock fair values
-            base_theo = self.get_fair_value()
+            base_theo = self.regression_fair_value
             if base_theo is not None:
                 # Add half the swap fee to the theoretical price
                 # This creates a "fair value band" of ±swap_fee/2 around the theoretical price
@@ -160,6 +181,7 @@ class AKIMAKAVBot(Compute):
             elif current_price < theo_price - self.swap_fee:
                 return 'underpriced'
         else:  # For AKIM, use regular threshold since no creation/redemption
+            pass 
             deviation = (current_price - theo_price) / theo_price
             if deviation > self.price_threshold:
                 return 'overpriced'
@@ -284,14 +306,16 @@ class AKIMAKAVBot(Compute):
         if abs(net_position) > 5:  # Threshold for hedging
             # Determine which symbol to hedge
             if net_position > 0:
-                # Net long position, need to short
-                if self.inventory["AKIM"] > 0:
-                    # Short AKIM
-                    self.place_hedge_order("AKIM", xchange_client.Side.SELL, abs(net_position))
-                else:
-                    # Short AKAV
-                    self.place_hedge_order("AKAV", xchange_client.Side.SELL, abs(net_position))
+                # # Net long position, need to short
+                # if self.inventory["AKIM"] > 0:
+                #     # Short AKIM
+                #     self.place_hedge_order("AKIM", xchange_client.Side.SELL, abs(net_position))
+                # else:
+                #     # Short AKAV
+                #     self.place_hedge_order("AKAV", xchange_client.Side.SELL, abs(net_position))
+                pass
             else:
+                pass
                 # Net short position, need to go long
                 if self.inventory["AKIM"] < 0:
                     # Buy AKIM
@@ -323,48 +347,151 @@ class AKIMAKAVBot(Compute):
         })
         print(f"Added HEDGE order to queue: {symbol} {side} {qty} @ {price}")
     
+    def _get_best_prices(self, symbol):
+        """Helper function to get best bid and ask prices from the order book."""
+        book = self.parent_client.order_books.get(symbol)
+        if not book:
+            return None, None
+        
+        sorted_bids = sorted(((p, q) for p, q in book.bids.items() if q > 0), reverse=True)
+        sorted_asks = sorted((p, q) for p, q in book.asks.items() if q > 0)
+        
+        best_bid = sorted_bids[0] if sorted_bids else None
+        best_ask = sorted_asks[0] if sorted_asks else None
+        
+        return best_bid, best_ask
+
     def execute_arbitrage(self, symbol, signal):
-        """Execute arbitrage trades based on signal"""
-        if symbol == "AKAV":  # Only AKAV can be created/redeemed
+        """Execute arbitrage trades based on signal, using swaps for AKAV."""
+        if symbol == "AKAV":  # Only AKAV can be created/redeemed via swap
             # Calculate the net profit after swap fee
             theo_price = self.calculate_theoretical_price("AKAV") - (self.swap_fee / 2)  # Remove the spread component
-            current_price = (self.market_making_quotes["AKAV"]["bid"] + self.market_making_quotes["AKAV"]["ask"]) / 2
-            
+            current_bid, current_ask = self._get_best_prices("AKAV")
+            if current_bid is None or current_ask is None:
+                print("Could not get current AKAV prices for arbitrage.")
+                return
+            current_price = (current_bid[0] + current_ask[0]) / 2 # Use mid-price for comparison
+            print("current_price: ", current_price)
+            print("theo_price: ", theo_price)
+
             if signal == 'underpriced':
-                # Calculate potential profit
-                profit_per_share = (theo_price - current_price - self.swap_fee)
+                # Calculate potential profit using the price we'll buy at (ask)
+                profit_per_share = (theo_price - current_ask[0] - self.swap_fee)
                 if profit_per_share <= 0:
+                    print(f"Skipping underpriced AKAV arbitrage, calculated profit {profit_per_share:.2f} <= 0")
                     return  # No profitable opportunity
+
+                print(f"Executing underpriced AKAV arbitrage. Expected profit: {profit_per_share:.2f}")
+                # 1. Buy AKAV at the ask price
+                buy_price = current_ask[0]
+                # 2. Place the swap order to redeem AKAV for underlying assets
+                # Use asyncio.create_task as place_swap_order is async
+                #asyncio.create_task(self.parent_client.place_swap_order("fromAKAV", self.arb_trade_size))
+    
+
+                symbol_to_sell = {}
                 
-                # ETF is trading below its theoretical value: buy AKAV shares and redeem
-                # Place buy order for AKAV
-                self.parent_client.trade_queue.put({
+                # 3. Place sell orders for the underlying assets received from the swap
+                for underlying_symbol in ["APT", "DLR", "MKJ"]:
+                    sell_price, _ = self._get_best_prices(underlying_symbol)
+                    
+                    symbol_to_sell[underlying_symbol] = sell_price[0]
+                    self.arb_trade_size = min(self.arb_trade_size, sell_price[1])
+                    
+                    if sell_price:
+                        print(f"Added ARBITRAGE SELL order for underlying: {underlying_symbol} {self.arb_trade_size} @ {sell_price}")
+                    else:
+                        print(f"Could not get sell price for {underlying_symbol} to complete arbitrage.")
+                        return
+                    
+                    underlying_cost = 0
+                    for symbol in symbol_to_sell:
+                        underlying_cost += symbol_to_sell[symbol] * self.arb_trade_size
+                    
+                    if underlying_cost > buy_price:
+                        print(f"Could not complete arbitrage, underlying cost {underlying_cost} is greater than buy price {buy_price}")
+                        return
+                    
+                    self.parent_client.trade_queue.put({
                     "symbol": "AKAV",
                     "side": xchange_client.Side.BUY,
                     "qty": self.arb_trade_size,
-                    "price": self.market_making_quotes["AKAV"]["ask"]
-                })
-                print(f"Added ARBITRAGE BUY order to queue: AKAV {self.arb_trade_size} @ {self.market_making_quotes['AKAV']['ask']}")
-                print(f"Expected profit per share after swap fee: {profit_per_share}")
-                
+                    "price": buy_price,
+                    "type": "swap"
+                    })
+                    print(f"Placed SWAP order: fromAKAV {self.arb_trade_size}")
+                    
+                    for symbol in symbol_to_sell:
+                        self.parent_client.trade_queue.put({
+                            "symbol": symbol,
+                            "side": xchange_client.Side.SELL,
+                            "qty": self.arb_trade_size,
+                            "price": symbol_to_sell[symbol]
+                        })
+                    
+                    
+
             elif signal == 'overpriced':
-                # Calculate potential profit
-                profit_per_share = (current_price - theo_price - self.swap_fee)
+                # Calculate potential profit using the price we'll sell at (bid)
+                profit_per_share = (current_bid[0] - theo_price - self.swap_fee)
                 if profit_per_share <= 0:
+                    print(f"Skipping overpriced AKAV arbitrage, calculated profit {profit_per_share:.2f} <= 0")
                     return  # No profitable opportunity
-                
-                # ETF is trading above its theoretical value: short AKAV shares and create
-                # Place sell order for AKAV
-                self.parent_client.trade_queue.put({
-                    "symbol": "AKAV",
-                    "side": xchange_client.Side.SELL,
-                    "qty": self.arb_trade_size,
-                    "price": self.market_making_quotes["AKAV"]["bid"]
-                })
-                print(f"Added ARBITRAGE SELL order to queue: AKAV {self.arb_trade_size} @ {self.market_making_quotes['AKAV']['bid']}")
-                print(f"Expected profit per share after swap fee: {profit_per_share}")
-                
+
+                print(f"Executing overpriced AKAV arbitrage. Expected profit: {profit_per_share:.2f}")
+                # 1. Buy underlying assets needed for the swap
+                underlying_cost = 0
+                can_buy_all_underlying = True
+                underlying_orders = []
+                for underlying_symbol in ["APT", "DLR", "MKJ"]:
+                    _, buy_price = self._get_best_prices(underlying_symbol)
+                    
+                    self.arb_trade_size = min(self.arb_trade_size, buy_price[1])
+                    if buy_price:
+                        underlying_orders.append({
+                            "symbol": underlying_symbol,
+                            "side": xchange_client.Side.BUY,
+                            "qty": self.arb_trade_size, # Assuming 1:1 swap ratio
+                            "price": buy_price[0]
+                        })
+                    else:
+                        print(f"Could not get buy price for {underlying_symbol} for arbitrage.")
+                        can_buy_all_underlying = False
+                        break # Cannot proceed if any underlying asset is unavailable
+
+                if can_buy_all_underlying:
+                    # Place buy orders for all underlying assets
+                    
+                    for order in underlying_orders:
+                        order["qty"] = self.arb_trade_size
+                        self.parent_client.trade_queue.put(order)
+                        print(f"Added ARBITRAGE BUY order for underlying: {order['symbol']} {order['qty']} @ {order['price']}")
+
+                    # 2. Place the swap order to create AKAV from underlying assets
+                    print(f"Placed SWAP order: toAKAV {self.arb_trade_size}")
+                    self.parent_client.trade_queue.put({
+                        "symbol": "AKAV",
+                        "side": xchange_client.Side.BUY,
+                        "qty": self.arb_trade_size,
+                        "price": buy_price,
+                        "type": "swap_to"
+                    })
+
+                    # 3. Place sell order for the created AKAV shares at the bid price
+                    sell_price = current_bid[0]
+                    self.parent_client.trade_queue.put({
+                        "symbol": "AKAV",
+                        "side": xchange_client.Side.SELL,
+                        "qty": self.arb_trade_size,
+                        "price": sell_price,
+                    })
+                    print(f"Added ARBITRAGE SELL order to queue: AKAV {self.arb_trade_size} @ {sell_price}")
+                else:
+                     print("Could not execute overpriced AKAV arbitrage due to missing underlying prices.")
+
+
         elif symbol == "AKIM":  # AKIM cannot be created/redeemed, only traded
+            pass
             # Check if we're in the final minutes of the day
             if self.is_final_minutes:
                 print("Skipping AKIM arbitrage in final minutes of the day")
@@ -469,6 +596,11 @@ class AKIMAKAVBot(Compute):
     def update_market_making_quotes(self, symbol):
         """Update market making quotes for a symbol"""
         # Get current market price
+    
+        if symbol == "AKIM":
+            return
+        
+
         book = self.parent_client.order_books[symbol]
         sorted_bids = sorted(((p, q) for p, q in book.bids.items() if q > 0), reverse=True)
         sorted_asks = sorted((p, q) for p, q in book.asks.items() if q > 0)
@@ -495,22 +627,22 @@ class AKIMAKAVBot(Compute):
         if bid_price and ask_price:
             self.market_making_quotes[symbol] = {"bid": bid_price, "ask": ask_price}
             
-            # Place market making orders
-            self.parent_client.trade_queue.put({
-                "symbol": symbol,
-                "side": xchange_client.Side.BUY,
-                "qty": self.market_making_size,
-                "price": bid_price
-            })
-            print(f"Added MARKET MAKING BUY order to queue: {symbol} {self.market_making_size} @ {bid_price}")
+            # # Place market making orders
+            # self.parent_client.trade_queue.put({
+            #     "symbol": symbol,
+            #     "side": xchange_client.Side.BUY,
+            #     "qty": self.market_making_size,
+            #     "price": bid_price
+            # })
+            # print(f"Added MARKET MAKING BUY order to queue: {symbol} {self.market_making_size} @ {bid_price}")
             
-            self.parent_client.trade_queue.put({
-                "symbol": symbol,
-                "side": xchange_client.Side.SELL,
-                "qty": self.market_making_size,
-                "price": ask_price
-            })
-            print(f"Added MARKET MAKING SELL order to queue: {symbol} {self.market_making_size} @ {ask_price}")
+            # self.parent_client.trade_queue.put({
+            #     "symbol": symbol,
+            #     "side": xchange_client.Side.SELL,
+            #     "qty": self.market_making_size,
+            #     "price": ask_price
+            # })
+            # print(f"Added MARKET MAKING SELL order to queue: {symbol} {self.market_making_size} @ {ask_price}")
     
     def calc_bid_ask_spread(self, symbol=None, df=None):
         """Calculate bid-ask spread for AKIM or AKAV"""
@@ -646,8 +778,35 @@ class AKIMAKAVBot(Compute):
             "price": price
         })
         print(f"CLOSING AKIM POSITION: {side} {abs(akim_position)} @ {price}")
+        
+    def increment_trade(self):
+        self.trade_count += 1
+        if self.trade_count % self.trading_frequency == 0:
+            self.handle_trade()
+            
+    def _update_imbalance_timeseries(self, timestamp, imbalance, bid_volume, ask_volume):
+        """
+        Update the imbalance timeseries with a new snapshot
+        
+        Args:
+            timestamp: Current timestamp
+            imbalance: Calculated order book imbalance
+            bid_volume: Total bid volume
+            ask_volume: Total ask volume
+        """
+        # Create a new row
+        new_row = pl.DataFrame([{
+            "timestamp": timestamp,
+            "imbalance": imbalance,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume
+        }])
+        
+        # Append to the timeseries
+        #print("new_row: ", new_row)
+        self.imbalance_timeseries = pl.concat([self.imbalance_timeseries, new_row])
 
-    async def process_update(self, index):
+    def handle_trade(self):
         """Process updates for AKIM and AKAV"""
         # Update current time
         current_time = time.time()
@@ -690,18 +849,18 @@ class AKIMAKAVBot(Compute):
             self.update_market_making_quotes(symbol)
             
             # Execute arbitrage if signal is present
-            if arbitrage_signal:
+            if arbitrage_signal is not None:
                 self.execute_arbitrage(symbol, arbitrage_signal)
             
             # Execute momentum trades if signal is strong
-            if abs(momentum_signal) > max(self.bullish_threshold, abs(self.bearish_threshold)):
-                self.execute_momentum_trade(symbol, momentum_signal)
+            # if abs(momentum_signal) > max(self.bullish_threshold, abs(self.bearish_threshold)):
+            #     self.execute_momentum_trade(symbol, momentum_signal)
         
         # Update pair correlation
         self.update_pair_correlation()
         
         # Update dynamic hedges
-        self.update_dynamic_hedges()
+        #self.update_dynamic_hedges()
         
         # Update inventory from parent client positions
         for symbol in self.symbols:
@@ -723,3 +882,75 @@ class AKIMAKAVBot(Compute):
             
             # Process the update
             await self.process_update(None)
+            
+    async def bot_handle_trade_msg(self, symbol: str, price: int, qty: int):
+        pass
+    
+    def _calculate_order_book_imbalance(self):
+        """
+        Calculate the order book imbalance using the parent client's LOB_timeseries
+        
+        Returns:
+            float: Order book imbalance between -1 and 1
+        """
+            
+        # Get the LOB timeseries from the parent client
+        lob_df = self.parent_client.stock_LOB_timeseries["DLR"]
+        
+        # If the timeseries is empty, return 0
+        if len(lob_df) == 0:
+            return 0.0
+            
+        # Get the last row of the timeseries
+        last_row = lob_df.tail(1)
+        
+        # Calculate total bid volume from all 4 price levels
+        bid_volume = (
+            last_row["best_bid_qt"].item() +  # Level 1
+            last_row["2_bid_qt"].item() +     # Level 2
+            last_row["3_bid_qt"].item()    # Level 3
+        )
+        
+        # Calculate total ask volume from all 4 price levels
+        ask_volume = (
+            last_row["best_ask_qt"].item() +  # Level 1
+            last_row["2_ask_qt"].item() +     # Level 2
+            last_row["3_ask_qt"].item()   # Level 3
+        )
+        
+        # Calculate total volume
+        total_volume = bid_volume + ask_volume
+        if total_volume == 0:
+            return 0.0
+        
+        # Imbalance is (bid_volume - ask_volume) / (bid_volume + ask_volume)
+        imbalance = (bid_volume - ask_volume) / total_volume
+        timestamp = int(time.time()*100)/100 - self.parent_client.start_time
+        #print("imbalance: ", imbalance)
+        self._update_imbalance_timeseries(timestamp, imbalance, bid_volume, ask_volume)
+        return imbalance
+    
+    def handle_snapshot(self, symbol: str):
+        self.rolling_count += 1
+        self.regression_fair_value = self.calc_regression_fair_value("AKAV", self.rolling_count)
+        self._calculate_order_book_imbalance()
+    
+    def get_regression_fair_value(self):
+        return self.regression_fair_value
+    
+    def get_regression_window(self):
+        return self.regression_window
+    
+    def get_imbalances(self, regression_window):
+        return self.imbalance_timeseries.select("imbalance").tail(regression_window-1).to_series().to_numpy()
+    
+    def get_vol_params(self):
+        return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
+    
+    def update_vol_params(self, omega_garch, alpha_garch, beta_garch, sigma):
+        self.omega_garch = omega_garch
+        self.alpha_garch = alpha_garch
+        self.beta_garch = beta_garch
+        self.sigma = sigma
+    
+    

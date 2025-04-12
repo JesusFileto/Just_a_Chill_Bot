@@ -12,18 +12,13 @@ class MKJBot(Compute):
         super().__init__(parent_client)
         self.symbol = "MKJ"
         self.trade_count = 0
-        self.fair_value = 1000
-        self.fair_value_timeseries = pl.DataFrame(schema={
-            "timestamp": pl.Int64,
-            "fair_value": pl.Float64,
-            "midpoint": pl.Float64
-        })
+        self.fair_value = None
         
         # Order book tracking
         
         # Order book imbalance tracking with Polars
         self.imbalance_timeseries = pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "imbalance": pl.Float64,
             "bid_volume": pl.Int64,
             "ask_volume": pl.Int64
@@ -37,16 +32,12 @@ class MKJBot(Compute):
         # Regression parameters
         self.alpha = 0.0  # Spread coefficient
         self.beta = 0.0   # Order book imbalance coefficient
-        self.regression_window = 10  # Window for regression
+        self.regression_window = 5  # Window for regression
         
-        # Fair value calculation parameters
-        self.k_factor = 1.5  # Confidence interval factor
-        self.min_spread = 0.1  # Minimum spread to consider
-        self.max_spread = 5.0  # Maximum spread to consider
         
         self.spread = None 
         self.trade_count = 0
-        self.trading_frequency = 30
+        self.trading_frequency = 50
         # Avellaneda–Stoikov parameters 
         self.T = 15 * 60 # 15 minute horizon 
         self.S0 = 1000
@@ -54,15 +45,39 @@ class MKJBot(Compute):
         self.deltaAsk = None 
         self.sigma = None
         self.A = 0.05 
-        self.k = math.log(2) / 0.01
+        self.k = .4
         self.q_tilde = 10 
         self.gamma = 0.01 / self.q_tilde
         self.n_steps = int(self.T)
         self.n_paths = 500 
         
+        self.rolling_count = 0
+        
+        self.fair_value_regression = None
+        
+        self.volatility_history = []
+        
+        self.open_orders = []
+        
         # GARCH parameters random initialization
         self.omega_garch, self.alpha_garch, self.beta_garch = [0.1, 0.05, 0.94]
         
+    
+    def get_imbalances(self, regression_window):
+        return self.imbalance_timeseries.select("imbalance").tail(regression_window-1).to_series().to_numpy()
+    
+    def get_regression_window(self):
+        return self.regression_window
+    
+    def update_vol_params(self, omega_garch, alpha_garch, beta_garch, sigma):
+        self.omega_garch = omega_garch
+        self.alpha_garch = alpha_garch
+        self.beta_garch = beta_garch
+        self.sigma = sigma
+        
+    def get_vol_params(self):
+        return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
+    
     def calc_bid_ask_spread(self):
         """
         Calculate the bid-ask spread for MKJ
@@ -90,95 +105,30 @@ class MKJBot(Compute):
         Returns:
             float: Fair value of MKJ
         """
-        historical_midpoints = None
-        historical_spreads = None
-        imbalance = self._calculate_order_book_imbalance()
-        with self.parent_client._lock:
-            historical_midpoints = self.parent_client.stock_LOB_timeseries["MKJ"]["mid_price"]
-            historical_spreads = self.parent_client.stock_LOB_timeseries["MKJ"]["spread"]
-        
-        
-        # If we don't have enough data, return a default value
-        if len(historical_midpoints) == 0:
-            return 1000.0
-        if len(historical_midpoints) < 5:
-            #mark return value as last value in historical_midpoints
-            return historical_midpoints[-1]
-        
-        
-        # Get the current midpoint
-        current_midpoint = historical_midpoints[-1] if historical_midpoints.is_empty() is False else 1000.0
-        #print("current_midpoint: ", current_midpoint)
-        
-        
-        # Convert historical spreads to numpy array if not empty
-        historical_spreads_np = historical_spreads.to_numpy() if not historical_spreads.is_empty() else None
-        
-        # Calculate spread impact using numpy array
-        current_spread = historical_spreads_np[-1] if historical_spreads_np is not None else 1.0
-        avg_spread = np.mean(historical_spreads_np) if historical_spreads_np is not None else 1.0
-        spread_ratio = current_spread / avg_spread if avg_spread > 0 else 1.0
-
-
-        
-        # Calculate volatility-adjusted fair value
-        # Fair value = midpoint + alpha*spread_change + beta*imbalance
-        spread_change = spread_ratio - 1.0  # Normalized spread change
-        
-        
-        
-        if len(historical_midpoints) >= self.regression_window:
-            self._update_regression_parameters(historical_midpoints, historical_spreads)
-            # Get previous snapshot values
-            prev_spread = historical_spreads[-2]
-            spread_change = current_spread - prev_spread
-            
-            # Get previous imbalance value
-            prev_imbalance = self.imbalance_timeseries.select("imbalance").tail(2).to_series().to_numpy()[0]
-            imbalance_change = imbalance - prev_imbalance
-            
-            # Use current alpha/beta but only look at most recent changes
-            fair_value = current_midpoint + self.alpha * spread_change + self.beta * imbalance_change
-            #print("fair_value", fair_value)
-            #print("current_midpoint", current_midpoint)
-            #print("self.alpha", self.alpha)
-            #print("self.beta", self.beta) 
-            #print("spread_change", spread_change)
-            #print("imbalance", imbalance)
-        else:
-            # Simple heuristic if we don't have enough data for regression
-            fair_value = current_midpoint + 0.1 * spread_change + 0.2 * imbalance
-        
-        
-        # Apply confidence bands based on volatility
-        # Fair value is within [fair_value - k*volatility, fair_value + k*volatility]
-        # lower_band = fair_value - self.k_factor * self.volatility
-        # upper_band = fair_value + self.k_factor * self.volatility
-        
-        # Ensure fair value is within reasonable bounds
-        fair_value = max(0, min(10000, fair_value))
-        self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma = self.calc_volatility()
-        #print("sigma: ", self.sigma)
-        #print("omega: ", self.omega_garch)
-        #print("alpha: ", self.alpha_garch)
-        #print("beta: ", self.beta_garch)
-        
-        #print("fair_value MKJ: ", fair_value)
-        self._update_fair_value_timeseries(fair_value)
-        return fair_value
+        self.fair_value_regression = super().calc_regression_fair_value(self.symbol, self.rolling_count)
+        print("symbol: ", self.symbol)
+        print("fair_value: ", self.fair_value_regression)
+        print("rolling_count: ", self.rolling_count)
+        if self.fair_value_regression is None:
+            return None
+        timestamp = int(time.time()*100)/100 - self.parent_client.start_time
+        self._update_fair_value_timeseries(timestamp, self.fair_value_regression)
+        return self.fair_value_regression
     
-    def calc_volatility(self):
-        params = super().calc_volatility(self.omega_garch, self.alpha_garch, self.beta_garch, index= self.regression_window)
+    def calc_volatility(self, omega_garch, alpha_garch, beta_garch):
+        params = super().calc_volatility(omega_garch, alpha_garch, beta_garch, index= self.regression_window)
         if params is not None and not any(np.isnan(p) for p in params):
             self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma = params
+            self.volatility_history.append(self.sigma)
             return params
+        self.volatility_history.append(self.sigma)
+        print("volatility history: ", self.volatility_history)
         return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
 
-    def _update_fair_value_timeseries(self, fair_value):
+    def _update_fair_value_timeseries(self, timestamp, fair_value):
         """
         Update the fair value timeseries with a new snapshot
         """
-        timestamp = self.parent_client.stock_LOB_timeseries[self.symbol]["timestamp"].tail(1).item()
         new_row = pl.DataFrame([{
             "timestamp": timestamp,
             "fair_value": int(fair_value),
@@ -206,17 +156,13 @@ class MKJBot(Compute):
         # Calculate total bid volume from all 4 price levels
         bid_volume = (
             last_row["best_bid_qt"].item() +  # Level 1
-            last_row["2_bid_qt"].item() +     # Level 2
-            last_row["3_bid_qt"].item() +     # Level 3
-            last_row["4_bid_qt"].item()       # Level 4
+            last_row["2_bid_qt"].item()     # Level 2
         )
         
         # Calculate total ask volume from all 4 price levels
         ask_volume = (
             last_row["best_ask_qt"].item() +  # Level 1
-            last_row["2_ask_qt"].item() +     # Level 2
-            last_row["3_ask_qt"].item() +     # Level 3
-            last_row["4_ask_qt"].item()       # Level 4
+            last_row["2_ask_qt"].item()     # Level 2
         )
         
         # Calculate total volume
@@ -252,58 +198,6 @@ class MKJBot(Compute):
         # Append to the timeseries
         #print("new_row: ", new_row)
         self.imbalance_timeseries = pl.concat([self.imbalance_timeseries, new_row])
-    
-   
-    
-    def _update_regression_parameters(self, historical_midpoints, historical_spreads):
-        """
-        Update the regression parameters alpha and beta using fast OLS
-        """
-        if len(historical_midpoints) < self.regression_window:
-            return
-        
-        # Prepare data for regression using last regression_window points
-        midpoints = np.array(list(historical_midpoints[-self.regression_window:]))
-        spreads = np.array(list(historical_spreads[-self.regression_window:]))
-        
-        # Calculate changes
-        delta_midpoints = np.diff(midpoints)
-        delta_spreads = np.diff(spreads)
-        
-        # Get historical imbalances from the timeseries
-        if len(self.imbalance_timeseries) >= self.regression_window:
-            # Use the most recent imbalances
-            imbalances = self.imbalance_timeseries.select("imbalance").tail(self.regression_window-1).to_series().to_numpy()
-        else:
-            # If we don't have enough imbalance data, use zeros
-            imbalances = np.zeros(self.regression_window-1)
-            
-        # print("midpoints: ", midpoints)
-        # print("spreads: ", spreads)
-        # print("imbalances: ", imbalances)
-        # print("delta_midpoints: ", delta_midpoints)
-        # print("delta_spreads: ", delta_spreads)
-        
-        # Prepare X matrix (spread changes and imbalances)
-        X = np.column_stack((delta_spreads, imbalances))
-        
-        # Prepare y vector (midpoint changes)
-        y = delta_midpoints
-        
-        # Perform regression if we have enough data
-        if len(X) > 0 and len(y) > 0 and len(X) == len(y):
-            try:
-                # Use numpy's lstsq for fast and stable OLS
-                beta_hat = np.linalg.lstsq(X, y, rcond=None)[0]
-                self.alpha = beta_hat[0]  # Coefficient for spread changes
-                self.beta = beta_hat[1]   # Coefficient for imbalances
-                #print("alpha: ", self.alpha)
-                #print("beta: ", self.beta)
-            except:
-                # If regression fails, use default values
-                self.alpha = 0.1
-                self.beta = 0.2
-
     
     def get_fair_value(self):
         return self.fair_value
@@ -343,12 +237,13 @@ class MKJBot(Compute):
         # For MKJ, we want to only update our model based on a new LOB snapshot
         # do we want to perform a trade after a fixed number of trades or time interval?
         self.trade_count += 1
-        if self.trade_count % self.trading_frequency == 0:
-            self.handle_trade("MKJ")
+        # if self.trade_count % self.trading_frequency == 0:
+        #     self.handle_trade("MKJ")
         
     def handle_snapshot(self):
         #print("handle_snapshot")
         #only want to update the fair value when we have a new LOB snapshot
+        self.rolling_count += 1
         self.fair_value = self.calc_fair_value()
         
     def calc_bid_ask_price(self, symbol=None, t=None):
@@ -370,3 +265,34 @@ class MKJBot(Compute):
     
     def get_q_tilde(self):
         return self.q_tilde
+    
+    def handle_news_update(self):
+        self.rolling_count = 0
+        self.trade_count = self.trading_frequency/2
+        
+    def unstructured_update(self, news_data):
+        self.handle_news_update()
+    
+    ##### closing positions #####
+    def begin_closing_positions(self):
+        self.closing_positions = True
+        
+    
+    def cancel_all_orders(self):
+        pass
+    
+    def handle_news_update(self):
+        self.rolling_count = 0
+        self.news_update_freeze = True
+        self.trade_count = self.trading_frequency/2
+        
+    def unstructured_update(self, news_data):
+        self.handle_news_update()
+        
+    
+        
+    def handle_snapshot(self):
+        self.rolling_count += 1
+        self.regression_fair_value = self.calc_regression_fair_value(self.symbol, self.rolling_count)
+        self._calculate_order_book_imbalance()
+    

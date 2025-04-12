@@ -96,6 +96,7 @@ class ComputeThread(threading.Thread):
                 if index is None:
                     # If stop_event is set, exit the loop
                     if self.stop_event.is_set() or self._is_shutting_down or self._force_exit or self._exit_requested or SHUTDOWN_EVENT.is_set():
+                        print(f"{self.name}: Stopping compute thread")
                         break
                     continue
              
@@ -170,7 +171,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
     
     # Initialize pnl_timeseries with columns for each symbol
     pnl_timeseries = pl.DataFrame(schema={
-        "timestamp": pl.Int64,
+        "timestamp": pl.Float64,
         "pnl": pl.Int64,
         "is_news_event": pl.Int64,
         "APT_pnl": pl.Int64,
@@ -182,15 +183,15 @@ class MyXchangeClient(xchange_client.XChangeClient):
     
     fair_value_timeseries = {
         "APT": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "fair_value": pl.Int64
         }),
         "DLR": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "fair_value": pl.Int64
         }),
         "MKJ": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "fair_value": pl.Int64
         })
     }
@@ -199,7 +200,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
     
     stock_LOB_timeseries = { 
         "APT": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "best_bid_px": pl.Int64,
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
@@ -220,7 +221,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "4_ask_qt": pl.Int64,
         }),
         "DLR": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "best_bid_px": pl.Int64,
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
@@ -241,7 +242,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "4_ask_qt": pl.Int64,
         }),
         "MKJ": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "best_bid_px": pl.Int64,
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
@@ -262,7 +263,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "4_ask_qt": pl.Int64,
         }),
         "AKAV": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "best_bid_px": pl.Int64,
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
@@ -283,7 +284,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "4_ask_qt": pl.Int64,
         }),
         "AKIM": pl.DataFrame(schema={
-            "timestamp": pl.Int64,
+            "timestamp": pl.Float64,
             "best_bid_px": pl.Int64,
             "best_bid_qt": pl.Int64,
             "best_ask_px": pl.Int64,
@@ -310,8 +311,9 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     def __init__(self, host: str, username: str, password: str):
         super().__init__(host, username, password)
-        self.start_time = int(time.time())  # Changed from milliseconds to seconds
-
+        self.start_time = int(time.time()*100)/100  # just initialize the start time
+        self.correct_time = False #use first timestamp as correct time to calibrate the clock
+        self.ticks_per_second = 450 #450 in practice round
         
         # Initialize specialized compute bots with self as parent
         self.compute_bots = {
@@ -330,8 +332,6 @@ class MyXchangeClient(xchange_client.XChangeClient):
             "AKIM": queue.Queue(),
             "AKAV": queue.Queue()
         }
-
-        self.start_time = int(time.time())  # Changed from milliseconds to seconds
         
     def start_compute_threads(self):
         """Start separate compute threads, each with its own asyncio event loop"""
@@ -382,14 +382,14 @@ class MyXchangeClient(xchange_client.XChangeClient):
             
         # Wait for all threads to finish with a timeout
         timeout = 2  # 2 seconds total timeout
-        start_time = time.time()
+        start_time = int(time.time()*100)/100 
         
         for thread_name, thread in self._compute_threads.items():
             if thread.is_alive():
                 print(f"Waiting for {thread.name} to finish...")
                 
                 # Calculate remaining timeout
-                elapsed = time.time() - start_time
+                elapsed = int(time.time()*100)/100 - start_time
                 remaining_timeout = max(0.1, timeout - elapsed)
                 
                 thread.join(timeout=remaining_timeout)
@@ -430,7 +430,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
 
     async def bot_handle_order_fill(self, order_id: str, qty: int, price: int):
         print("order fill", self.positions)
-
+        for bot in self.compute_bots.values():
+            if bot == self.compute_bots["AKIM_AKAV"]:
+                continue
+            if order_id in bot.open_orders:
+                #qty = order
+                pass
     async def bot_handle_order_rejected(self, order_id: str, reason: str) -> None:
         print("order rejected because of ", reason)
 
@@ -445,12 +450,12 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 await self.compute_bots["AKIM_AKAV"].bot_handle_trade_msg(symbol, price, qty)
             else:
                 await self.compute_bots[symbol].bot_handle_trade_msg(symbol, price, qty)
-    
 
     async def bot_handle_book_update(self, symbol: str):
         if symbol in self.stock_LOB_timeseries:
             # Let data bot process the update first
             if symbol == "AKIM" or symbol == "AKAV":
+                #pass for now to prevent etf trading
                 self.compute_bots["AKIM_AKAV"].increment_trade()
             else:
                 self.compute_bots[symbol].increment_trade()
@@ -464,7 +469,22 @@ class MyXchangeClient(xchange_client.XChangeClient):
         news_type = news_release['kind']
         news_data = news_release["new_data"]
         
-        print(news_data)
+        if self.correct_time == False:
+            timestamp_seconds = timestamp / 5 #450 in practice round per day day is 90 seconds, 5 ticks per second
+            self.correct_time = True
+            self.start_time = self.start_time - timestamp_seconds #shift epoch time to correct start time
+            self.compute_bots["DLR"].update_rounds()
+            print("timestamp_seconds: ", timestamp)
+            print("update_counter: ", self.compute_bots["DLR"].update_counter)
+            if news_type == "structured":
+                if news_data["structured_subtype"] != "earnings":
+                    print("updating counter")
+                    print("timestamp_seconds: ", timestamp)
+                    print("update_counter: ", self.compute_bots["DLR"].update_counter)
+                    self.compute_bots["DLR"].update_counter -= 1
+            print("timestamp_seconds: ", timestamp_seconds)
+        
+        #print(news_data)
 
         if news_type == "structured":
             subtype = news_data["structured_subtype"]
@@ -474,14 +494,26 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 earnings = news_data["value"]
 
                 self.compute_bots["APT"].handle_earnings_update(earnings)
+                self.compute_bots["APT"].handle_news_update()
                 
             else:
                 new_signatures = news_data["new_signatures"]
                 cumulative = news_data["cumulative"]
+                self.compute_bots["DLR"].handle_news_update()
                 self.compute_bots["DLR"].signature_update(new_signatures, cumulative)
         else:
-            for bot in self.compute_bots.values():
-                bot.unstructured_update(news_data)
+            if news_data == "Ten seconds to EOD.":
+                #set flags to all bots to close positions
+                for bot in self.compute_bots.values():
+                    bot.begin_closing_positions()
+            if news_data == "EOD - AKIM has rebalanced":
+                #we want to cancel all orders at this point find/create function
+                pass
+                #for bot in self.compute_bots.values():
+                #    bot.cancel_all_orders()
+            else:
+                for bot in self.compute_bots.values():
+                    bot.unstructured_update(news_data)
     
 
     async def plot_best_bid_ask(self):
@@ -590,7 +622,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
         #print("viewing books")
         while True:
             await asyncio.sleep(1)
-            current_time = int(time.time()) - self.start_time
+            current_time = int(time.time()*100)/100 - self.start_time
             
             # Initialize base PNL with cash position
             pnl = self.positions['cash']
@@ -614,7 +646,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 # Create a new row with the first 3 levels of bids and asks
                 if symbol in self.stock_LOB_timeseries:
                     # Get current timestamp
-                    current_time = int(time.time()) - self.start_time 
+                    current_time = int(time.time()*100)/100 - self.start_time 
                     
                     # Create row data with first 3 levels
                     row_data = {
@@ -625,13 +657,48 @@ class MyXchangeClient(xchange_client.XChangeClient):
                         "best_ask_qt": sorted_asks[0][1] if sorted_asks else 0,
                     }
                     
-                    if len(sorted_bids) > 0 and len(sorted_asks) > 0:
-                        row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
-                        row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2
+                    if symbol == "AKIM" or symbol == "AKAV":
+                        if len(sorted_bids) > 0 and len(sorted_asks) > 0:
+                            row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
+                            row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2 
+                        elif len(self.stock_LOB_timeseries[symbol]["spread"]) == 0:
+                            row_data["spread"] = 6
+                            row_data["mid_price"] = 0
+                        else:
+                            row_data["spread"] = self.stock_LOB_timeseries[symbol]["spread"].tail(1).item()
+                            row_data["mid_price"] = self.stock_LOB_timeseries[symbol]["mid_price"].tail(1).item()
+                        
+                        if row_data["best_bid_px"] == 0 or row_data["best_ask_px"] == 0:
+                            if len(self.stock_LOB_timeseries[symbol]["spread"]) == 0:
+                                row_data["best_bid_px"] = 0
+                                row_data["best_ask_px"] = 0
+                            else:
+                                row_data["best_bid_px"] = self.stock_LOB_timeseries[symbol]["best_bid_px"].tail(1).item() + 3
+                                row_data["best_ask_px"] = self.stock_LOB_timeseries[symbol]["best_ask_px"].tail(1).item() - 3
+                        
+                        if row_data["best_bid_qt"] == 0 or row_data["best_ask_qt"] == 0:
+                            row_data["best_bid_qt"] = 1
+                            row_data["best_ask_qt"] = 1
                     else:
-                        row_data["spread"] = 0
-                        row_data["mid_price"] = float(0)
+                        if len(sorted_bids) > 0 and len(sorted_asks) > 0:
+                            row_data["spread"] = sorted_asks[0][0] - sorted_bids[0][0]
+                            row_data["mid_price"] = (sorted_asks[0][0] + sorted_bids[0][0]) / 2
+                        else:
+                            row_data["spread"] = 6
+                            row_data["mid_price"] = self.compute_bots[symbol].get_fair_value()
+                        
+                        if row_data["best_bid_px"] == 0 or row_data["best_ask_px"] == 0:
+                            row_data["best_bid_px"] = 0
+                            row_data["best_ask_px"] = 0
+                        
+                        if row_data["best_bid_qt"] == 0 or row_data["best_ask_qt"] == 0:
+                            row_data["best_bid_qt"] = 1
+                            row_data["best_ask_qt"] = 1
                     
+                    #prevent 0 values from being used
+                    if row_data["spread"] == 0 or row_data["mid_price"] == 0:
+                        row_data["spread"] = self.stock_LOB_timeseries[symbol]["spread"].tail(1).item()
+                        row_data["mid_price"] = self.stock_LOB_timeseries[symbol]["mid_price"].tail(1).item()
                     # Add second, third, and fourth levels if available
                     if len(sorted_bids) > 1:
                         row_data["2_bid_px"] = sorted_bids[1][0]
@@ -681,12 +748,14 @@ class MyXchangeClient(xchange_client.XChangeClient):
                             self.stock_LOB_timeseries[symbol],
                             new_row
                         ])
-                    if symbol == "MKJ":
+                    if symbol == "MKJ" or symbol == "APT" or symbol == "DLR":
                         #print("incrementing trade for MKJ")
-                        self.compute_bots["MKJ"].handle_snapshot()
+                        self.compute_bots[symbol].handle_snapshot()
+                    else:
+                        self.compute_bots["AKIM_AKAV"].handle_snapshot(symbol)
             
             # Update PnL timeseries with total unrealized PnL
-            current_time = int(time.time()) - self.start_time
+            current_time = int(time.time()*100)/100 - self.start_time
             
             # Create a dictionary with all PNL data
             pnl_data = {
@@ -801,6 +870,22 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 side = trade.get("side") 
                 qty = trade.get("qty")
                 price = trade.get("price")
+                type = trade.get("type")
+                
+                if type == "swap":
+                    print(f"Swapping {symbol} {qty} @ {price}")
+                    order_id = await self.place_swap_order("from"+symbol, qty)
+                    print(f"Order placed with ID: {order_id}")
+                    self.trade_queue.task_done()
+                    continue
+                
+                if type == "swap_to":
+                    print(f"Swapping {symbol} {qty} @ {price}")
+                    order_id = await self.place_swap_order("to"+symbol, qty)
+                    print(f"Order placed with ID: {order_id}")
+                    self.trade_queue.task_done()
+                    continue
+                
                 
                 if not all([symbol, side, qty, price]):
                     print(f"Invalid trade data: {trade}")
@@ -812,6 +897,7 @@ class MyXchangeClient(xchange_client.XChangeClient):
                 order_id = await self.place_order(symbol, qty, side, price)
                 print(f"Order placed with ID: {order_id}")
                 
+                #self.compute_bots[symbol].open_orders.append(order_id)
                 # Mark task as done
                 self.trade_queue.task_done()
                 
@@ -833,6 +919,8 @@ class MyXchangeClient(xchange_client.XChangeClient):
             asyncio.create_task(self.handle_queued_messages())
 
         await self.connect()
+        
+        print("stopping compute threads")
     
     async def plot_fair_value(self):
         plt.figure(figsize=(12, 6))
@@ -874,6 +962,10 @@ async def main(user_interface: bool):
     
     try:
         await my_client.start(user_interface)
+    except Exception as e:
+        print("Exception encountered in start:", e)
+        import traceback
+        traceback.print_exc()  # Print the full stack trace
     finally:
         # Plot data at the end of trading
         await my_client.plot_best_bid_ask()

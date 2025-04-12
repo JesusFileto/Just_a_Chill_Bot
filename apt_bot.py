@@ -19,7 +19,7 @@ class APTBot(Compute):
         self.spread = None 
         self.pe_ratio = 10 # for practice rounds
         self.trade_count = 0
-        self.trading_frequency = 30
+        self.trading_frequency = 50
         # Avellaneda–Stoikov parameters 
         self.T = 15 * 60 # 15 minute horizon 
         self.S0 = None
@@ -27,11 +27,43 @@ class APTBot(Compute):
         self.deltaAsk = None 
         self.A = 0.05 
         self.sigma = None
-        self.k = math.log(2) / 0.01
+        self.k = .4
         self.q_tilde = 10 
-        self.gamma = 0.01 / self.q_tilde
+        self.gamma = 0.1 / self.q_tilde
         self.n_steps = int(self.T)
         self.n_paths = 500 
+        self.received_earnings = False
+        
+        self.open_orders = []
+        
+        # Volatility calculation
+        self.volatility_window = 20  # Window for volatility calculation
+        self.volatility = 0.0  # Current volatility
+        
+        self.rolling_count = 0
+        
+        self.fair_value_regression = None
+        
+        # Regression parameters
+        self.alpha = 0.0  # Spread coefficient
+        self.beta = 0.0   # Order book imbalance coefficient
+        self.regression_window = 5  # Window for regression
+        # Order book imbalance tracking with Polars
+        self.imbalance_timeseries = pl.DataFrame(schema={
+            "timestamp": pl.Float64,
+            "imbalance": pl.Float64,
+            "bid_volume": pl.Int64,
+            "ask_volume": pl.Int64
+        })
+        
+        self.news_update_freeze = False
+        self.alpha = 0.0  # Spread coefficient
+        self.beta = 0.0   # Order book imbalance coefficient
+        self.regression_weight = .6 #weight for regression fair value, start with 0
+        
+        # GARCH parameters random initialization
+        self.omega_garch, self.alpha_garch, self.beta_garch = [0.1, 0.05, 0.94]
+        
         
     def calc_bid_ask_price(self, symbol=None, t=None):
         return super().calc_bid_ask_price(self.symbol, t)
@@ -41,6 +73,76 @@ class APTBot(Compute):
     
     def get_avellaneda_stoikov_params(self):
         return self.gamma, self.k, self.fair_value, self.T, self.sigma
+    
+    def _update_imbalance_timeseries(self, timestamp, imbalance, bid_volume, ask_volume):
+        """
+        Update the imbalance timeseries with a new snapshot
+        
+        Args:
+            timestamp: Current timestamp
+            imbalance: Calculated order book imbalance
+            bid_volume: Total bid volume
+            ask_volume: Total ask volume
+        """
+        # Create a new row
+        new_row = pl.DataFrame([{
+            "timestamp": timestamp,
+            "imbalance": imbalance,
+            "bid_volume": bid_volume,
+            "ask_volume": ask_volume
+        }])
+        
+        # Append to the timeseries
+        #print("new_row: ", new_row)
+        self.imbalance_timeseries = pl.concat([self.imbalance_timeseries, new_row])
+    
+    
+        
+    def _calculate_order_book_imbalance(self):
+        """
+        Calculate the order book imbalance using the parent client's LOB_timeseries
+        
+        Returns:
+            float: Order book imbalance between -1 and 1
+        """
+            
+        # Get the LOB timeseries from the parent client
+        lob_df = self.parent_client.stock_LOB_timeseries["APT"]
+        
+        # If the timeseries is empty, return 0
+        if len(lob_df) == 0:
+            return 0.0
+            
+        # Get the last row of the timeseries
+        last_row = lob_df.tail(1)
+        
+        # Calculate total bid volume from all 4 price levels
+        bid_volume = (
+            last_row["best_bid_qt"].item() +  # Level 1
+            last_row["2_bid_qt"].item() +     # Level 2
+            last_row["3_bid_qt"].item() +     # Level 3
+            last_row["4_bid_qt"].item()       # Level 4
+        )
+        
+        # Calculate total ask volume from all 4 price levels
+        ask_volume = (
+            last_row["best_ask_qt"].item() +  # Level 1
+            last_row["2_ask_qt"].item() +     # Level 2
+            last_row["3_ask_qt"].item() +     # Level 3
+            last_row["4_ask_qt"].item()       # Level 4
+        )
+        
+        # Calculate total volume
+        total_volume = bid_volume + ask_volume
+        if total_volume == 0:
+            return 0.0
+        
+        # Imbalance is (bid_volume - ask_volume) / (bid_volume + ask_volume)
+        imbalance = (bid_volume - ask_volume) / total_volume
+        timestamp = self.parent_client.stock_LOB_timeseries[self.symbol]["timestamp"].tail(1).item()
+        #print("imbalance: ", imbalance)
+        self._update_imbalance_timeseries(timestamp, imbalance, bid_volume, ask_volume)
+        return imbalance
         
         
     # def calc_bid_ask_spread(self):
@@ -119,15 +221,50 @@ class APTBot(Compute):
     #     return reservation_price
     
     def calc_fair_value(self):
+        # add regression to fair value and weight it according to volatility
+        if self.news_update_freeze == True:
+            if self.rolling_count > 4: #our regression window is 5 so remove freeze for next update
+                self.news_update_freeze = False
+            self.fair_value_regression = None # in freeze dont use regression
+        else:
+            self.fair_value_regression = self.calc_regression_fair_value(self.symbol, self.rolling_count)
+            print("regression_fair_value: ", self.fair_value_regression)
         if self.earnings is None: 
             return 
-        self.fair_value = 100 * self.earnings / self.pe_ratio
-        current_time = int(time.time()) - self.parent_client.start_time
+        fundamental_fair_value = 100 * self.earnings / self.pe_ratio
+        print("fundamental_fair_value: ", fundamental_fair_value)
+        if self.fair_value_regression is None:
+            self.fair_value = fundamental_fair_value
+        else:   
+            self.fair_value = self.regression_weight * self.fair_value_regression + (1 - self.regression_weight) * fundamental_fair_value
+        
+        current_time = int(time.time()*100)/100 - self.parent_client.start_time
+        if self.fair_value is None:
+            return None
         self._update_fair_value_timeseries(current_time, self.fair_value)
 
+    
+    def get_imbalances(self, regression_window):
+        return self.imbalance_timeseries.select("imbalance").tail(regression_window-1).to_series().to_numpy()
+    
+    def get_regression_window(self):
+        return self.regression_window
+    
+    def update_vol_params(self, omega_garch, alpha_garch, beta_garch, sigma):
+        self.omega_garch = omega_garch
+        self.alpha_garch = alpha_garch
+        self.beta_garch = beta_garch
+        self.sigma = sigma
+        
+    def get_vol_params(self):
+        return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
+        
     def handle_earnings_update(self, earnings):  
         self.earnings = earnings 
-        self.calc_fair_value()
+        self.received_earnings = True
+        self.fair_value = 100 * self.earnings / self.pe_ratio #dont want to use regression for new information
+        current_time = int(time.time()*100)/100 - self.parent_client.start_time
+        self._update_fair_value_timeseries(current_time, self.fair_value)
         #print("handling earnings: ", self.fair_value)
         
         self.parent_client.pnl_timeseries = self.parent_client.pnl_timeseries.with_columns(
@@ -138,11 +275,9 @@ class APTBot(Compute):
         )
         
     def get_fair_value(self): 
-        if self.earnings is None: 
-            self.fair_value = 1000
 
         self.S0 = self.fair_value
-        current_time = int(time.time()) - self.parent_client.start_time
+        current_time = int(time.time()*100)/100 - self.parent_client.start_time
         return self.fair_value 
     
     def _update_fair_value_timeseries(self, timestamp, fair_value):
@@ -175,13 +310,13 @@ class APTBot(Compute):
         try:
             self.trade_count += 1
             #dont trade apt while testing
-            if self.trade_count % self.trading_frequency == 0:
-                try:
-                    self.handle_trade("APT")
-                except Exception as e:
-                    print(f"Error in handle_trade for APT: {e}")
-                    import traceback
-                    traceback.print_exc()
+            # if self.trade_count % self.trading_frequency == 0:
+            #     try:
+            #         self.handle_trade("APT")
+            #     except Exception as e:
+            #         print(f"Error in handle_trade for APT: {e}")
+            #         import traceback
+            #         traceback.print_exc()
         except Exception as e:
             print(f"Unexpected error in increment_trade for APT: {e}")
             import traceback
@@ -197,6 +332,37 @@ class APTBot(Compute):
                 .alias("is_news_event")
             )
     
-    def calc_volatility(self):
-        super().calc_volatility()
+    def calc_volatility(self, omega_garch, alpha_garch, beta_garch):
+        params = super().calc_volatility(self.omega_garch, self.alpha_garch, self.beta_garch, index= self.regression_window)
+        if params is not None and not any(np.isnan(p) for p in params):
+            self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma = params
+            return params
+        return self.omega_garch, self.alpha_garch, self.beta_garch, self.sigma
+    
+    
         #print("volatility: ", self.sigma)
+        
+    def handle_news_update(self):
+        self.rolling_count = 0
+        self.news_update_freeze = True
+        self.trade_count = self.trading_frequency/2
+        
+    def unstructured_update(self, news_data):
+        self.handle_news_update()
+    
+    def handle_snapshot(self):
+        self.rolling_count += 1
+        self._calculate_order_book_imbalance()
+        if self.received_earnings == False:
+            self.fair_value = self.calc_regression_fair_value(self.symbol, self.rolling_count)
+            self.fair_value_regression = self.fair_value
+        else:
+            self.fair_value = self.calc_fair_value()
+            self.fair_value_regression = self.fair_value
+    ##### closing positions #####
+    def begin_closing_positions(self):
+        self.closing_positions = True
+        
+    
+    def cancel_all_orders(self):
+        pass
